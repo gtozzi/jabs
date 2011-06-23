@@ -12,6 +12,24 @@ Main features:
 - Incremental "complete" backups using hard links
 - E-Mail notifications on completion
 
+Installation:
+- This script is supposed to run as root
+- Copy jabs.cfg in /etc/jabs/jabs.cfg and customize it
+- Create folder /var/cache/jabs
+
+Usage:
+Place a cron entry like this one:
+
+MAILTO="your-email-address"
+
+*/5 * * * *     root    /usr/local/bin/jabs.py -b -q
+
+The script will end silently when has nothing to do.
+Where there is a "soft" error or when a backup is completed, you'll receive
+an email from the script
+Where there is an "hard" error, you'll receive an email from Cron Daemon (so
+make sure cron is able to send emails)
+
 @author Gabriele Tozzi <gabriele@tozzi.eu>
 
 This program is free software: you can redistribute it and/or modify
