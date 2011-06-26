@@ -204,7 +204,7 @@ class BackupSet:
         self.ping = False
         self.runtime = "00:00:00-23:59:59"
         self.mailto = None
-        self.mailfrom = None
+        self.mailfrom = getpass.getuser() + '@' + socket.gethostname()
         self.mount = ""
         self.umount = ""
         
