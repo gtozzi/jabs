@@ -60,7 +60,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.0.9"
+version = "jabs v.1.0"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -244,7 +244,7 @@ username = getpass.getuser()
 starttime = datetime.now()
 
 # Parses the command line
-usage = "usage: %prog [options]"
+usage = "usage: %prog [options] [sets]"
 version = version
 parser = OptionParser(usage=usage, version=version)
 parser.add_option("-c", "--config", dest="configfile",
@@ -288,6 +288,11 @@ if sets.count("Global") < 1:
     print "ERROR: Global section on config file not found"
     sys.exit(1)
 sets.remove("Global")
+
+# If specified at command line, remove unwanted sets
+if args:
+    lower_args = map(lambda i: i.lower(), args)
+    sets[:] = [s for s in sets if s.lower() in lower_args]
 
 if options.debug > 0:
     print "Will run these backup sets:", sets
