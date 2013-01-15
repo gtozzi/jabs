@@ -60,7 +60,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.0"
+version = "jabs v.1.0.1"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -178,6 +178,15 @@ def parseTwoTimes(string):
     """
     return map(lambda s: wrapper(time,map(int,s.split(':'))), string.split('-'))
 
+def splitAndTrim(string):
+    """
+        Split a string by commas and trim each element of the resulting list.
+        If input is None, return None
+    """
+    if string is None:
+        return string
+    return map(lambda i: i.strip(), string.split(','))
+
 class BackupSet:
     """
         Backup set class
@@ -228,7 +237,7 @@ class BackupSet:
         self.interval = parseInterval(getConfigValue('INTERVAL', config, self.name, self.interval))
         self.ping = bool(getConfigValue('PING', config, self.name, self.ping))
         self.runtime = parseTwoTimes(getConfigValue('RUNTIME', config, self.name, self.runtime))
-        self.mailto = getConfigValue('MAILTO', config, self.name, self.mailto)
+        self.mailto = splitAndTrim(getConfigValue('MAILTO', config, self.name, self.mailto))
         self.mailfrom = getConfigValue('MAILFROM', config, self.name, self.mailfrom)
         self.mount = getConfigValue('MOUNT', config, self.name, self.mount)
         self.umount = getConfigValue('UMOUNT', config, self.name, self.umount)
@@ -689,7 +698,7 @@ for s in sets:
             else:
                 m_from = username + "@" + hostname
             msg['From'] = m_from
-            msg['To'] = s.mailto
+            msg['To'] = ', '.join(s.mailto)
             msg.preamble = 'This is a milti-part message in MIME format.'
             
             # Aggiungo il testo base
