@@ -45,7 +45,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
-import os, sys, socket, subprocess, tempfile, getpass
+import os, sys, socket, subprocess, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
 from optparse import OptionParser
 import ConfigParser
@@ -195,6 +195,7 @@ class BackupSet:
         self.disabled = False
         self.name = name
         self.backuplist = None
+        self.deletelist = ""
         self.ionice = 0
         self.nice = 0
         self.rsync_opts = None
@@ -218,6 +219,8 @@ class BackupSet:
         
         self.backuplist = getConfigValue('BACKUPLIST', config, self.name).split(",")
         self.backuplist = [ x.strip() for x in self.backuplist ]
+        self.deletelist = getConfigValue('DELETELIST', config, self.name, self.deletelist).split(",")
+        self.deletelist = [ x.strip() for x in self.deletelist ]
         self.ionice = int(getConfigValue('IONICE', config, self.name, self.ionice))
         self.nice = int(getConfigValue('NICE', config, self.name, self.nice))
         self.rsync_opts = getConfigValue('RSYNC_OPTS', config, self.name).split(",")
@@ -632,6 +635,13 @@ for s in sets:
             else:
                 sl.add("Sleeping", s.sleep, "secs.")
                 sleep(s.sleep)
+
+    # Delete dirs from deletelist
+    for d in s.deletelist:
+        deldest = s.dst + ifelse(len(hanoisuf)>0,s.sep+hanoisuf,"") + os.sep + d
+        if os.path.exists(deldest) and os.path.isdir(deldest):
+            sl.add('DELETING folder in deletelist %s' % deldest)
+            shutil.rmtree(deldest)
 
     # Save last backup execution time
     if s.interval > timedelta(seconds=0):
