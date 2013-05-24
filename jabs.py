@@ -15,7 +15,6 @@ Main features:
 Installation:
 - This script is supposed to run as root
 - Copy jabs.cfg in /etc/jabs/jabs.cfg and customize it
-- Create folder /var/cache/jabs
 
 Usage:
 Place a cron entry like this one:
@@ -60,7 +59,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.0.1"
+version = "jabs v.1.0.2"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -640,7 +639,12 @@ for s in sets:
             sl.add("Skipping write of last backup timestamp")
         else:
             sl.add("Writing last backup timestamp", lvl=1)
-            cachefile = options.cachedir + "/" + s.name
+            
+            # Create cachedir if missing
+            if not os.path.exists(options.cachedir):
+                os.makedirs(options.cachedir, 0700)
+            
+            cachefile = options.cachedir + os.sep + s.name
             CACHEFILE = open(cachefile,'w')
             CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
             CACHEFILE.close()
