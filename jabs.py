@@ -59,7 +59,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.0.2"
+version = "jabs v.1.1"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -78,6 +78,13 @@ def ifelse(condition, ifTrue, ifFalse):
         return ifTrue
     else:
         return ifFalse
+
+def wrapper(func, args):
+    """
+        Takes a list of arguments and passes them as positional arguments to
+        func
+    """
+    return func(*args)
 
 class MyLogger:
     """ Custom logger class
@@ -129,62 +136,102 @@ class MyLogger:
                 retstr += l[0] + "\n"
         return retstr
 
-def wrapper(func, args):
+class JabsConfig(ConfigParser.ConfigParser):
     """
-        Takes a list of arguments and passes them as positional arguments to
-        func
+        Custom configuration parser
     """
-    return func(*args)
+    BASE_SECTION = 'Global'
+    LIST_SEP = ','
+    
+    def __getInType(self, name, section, vtype):
+        """ Internal function called by __get """
+        if vtype == 'str':
+            return ConfigParser.ConfigParser.get(self, section, name).strip()
+        elif vtype == 'int':
+            return ConfigParser.ConfigParser.getint(self, section, name)
+        elif vtype == 'bool':
+            return ConfigParser.ConfigParser.getboolean(self, section, name)
+        elif vtype == 'list':
+            return [ x.strip() for x in ConfigParser.ConfigParser.get(self, section, name).strip().split(self.LIST_SEP) ]
+        elif vtype == 'date':
+            return wrapper(date, map(int, ConfigParser.ConfigParser.get(self, section, name).strip().split('-',3)))
+        elif vtype == 'interval':
+            string = ConfigParser.ConfigParser.get(self, section, name).strip()
+            d, h, m, s = (0 for x in xrange(4))
+            if len(string):
+                for i in string.split():
+                    if i[-1] == 's':
+                        s = int(i[:-1])
+                    elif i[-1] == 'm':
+                        m = int(i[:-1])
+                    elif i[-1] == 'h':
+                        h = int(i[:-1])
+                    elif i[-1] == 'd':
+                        d = int(i[:-1])
+            return timedelta(days=d,hours=h,minutes=m,seconds=s)
+        elif vtype == 'timerange':
+            return map(lambda s: wrapper(time,map(int,s.split(':'))), ConfigParser.ConfigParser.get(self, section, name).strip().split('-'))
+        else:
+            raise RuntimeError("Unvalid vtype %s" % vtype)
 
-def getConfigValue(name, config, backupset, default=None):
-    """
-        Reads a value from configuration,
-        try to read it from backupset section, reads it from Global if missing
-        returns the value or exits with an error
-    """
-    try:
-        return config.get(backupset, name).strip()
-    except(ConfigParser.NoSectionError, ConfigParser.NoOptionError):
+    def __get(self, name, section=NotImplemented, default=NotImplemented, vtype='str'):
+        """
+            Get an option value for the named section.
+            If section is missing, uses the Global section.
+            If value is missing, and a default value is passed, return default.
+            All values are stripped before bein' returned.
+            Converts the value to given vtype: string, int, bool, list, date
+        """
+        if section is NotImplemented:
+            section = self.BASE_SECTION
+        
         try:
-            return config.get("Global", name).strip()
-        except:
-            if default != None:
-                return default
-            else:
-                print "Error parsing config file: option", name, "not found."
-                sys.exit(10)
-
-def parseInterval(string):
-    """
-        Reads a string interval, i.e. "1d 1h 1m 1s" and returns a timedelta
-    """
-    d, h, m, s = (0 for x in xrange(4))
-    if len(string):
-        for i in string.split():
-            if i[-1] == 's':
-                s = int(i[:-1])
-            elif i[-1] == 'm':
-                m = int(i[:-1])
-            elif i[-1] == 'h':
-                h = int(i[:-1])
-            elif i[-1] == 'd':
-                d = int(i[:-1])
-    return timedelta(days=d,hours=h,minutes=m,seconds=s)
-
-def parseTwoTimes(string):
-    """
-        Reads a string in the format hh:mm:ss-hh:mm:ss, returns a list of time objects
-    """
-    return map(lambda s: wrapper(time,map(int,s.split(':'))), string.split('-'))
-
-def splitAndTrim(string):
-    """
-        Split a string by commas and trim each element of the resulting list.
-        If input is None, return None
-    """
-    if string is None:
-        return string
-    return map(lambda i: i.strip(), string.split(','))
+            return self.__getInType(name, section, vtype)
+        except(ConfigParser.NoSectionError, ConfigParser.NoOptionError):
+            try:
+                return self.__getInType(name, self.BASE_SECTION, vtype)
+            except ConfigParser.NoOptionError as e:
+                if default is not NotImplemented:
+                    return default
+                else:
+                    raise ValueError("Error parsing config file: option %s not found." % name)
+    
+    def getstr(self, name, section=NotImplemented, default=NotImplemented):
+        """ Same as __get, returning a string """
+        return self.__get(name, section, default, 'str')
+    
+    def getint(self, name, section=NotImplemented, default=NotImplemented):
+        """ Same as __get, but also formats value as int """
+        return self.__get(name, section, default, 'int')
+    
+    def getlist(self, name, section=NotImplemented, default=NotImplemented):
+        """
+            Same as __get, but returns a list from a comma-separated string.
+            Also strips every element of the list.
+        """
+        return self.__get(name, section, default, 'list')
+    
+    def getfloat(self, name, section=NotImplemented, default=NotImplemented):
+        raise NotImplementedError('Method not implemented')
+    
+    def getboolean(self, name, section=NotImplemented, default=NotImplemented):
+        """ Same as __get, but also formats value as boolean """
+        return self.__get(name, section, default, 'bool')
+    
+    def getdate(self, name, section=NotImplemented, default=NotImplemented):
+        """ Same as __get, but returns a date from the format YYYY-MM-DD """
+        return self.__get(name, section, default, 'date')
+    
+    def getinterval(self, name, section=NotImplemented, default=NotImplemented):
+        """ Same as __get, but returns a timedelta from a string interval """
+        return self.__get(name, section, default, 'interval')
+    
+    def gettimerange(self, name, section=NotImplemented, default=NotImplemented):
+        """
+            Same as __get, but returns a list with two time objects representing
+            a time range form a string in the format hh:mm:ss-hh:mm:ss
+        """
+        return self.__get(name, section, default, 'timerange')
 
 class BackupSet:
     """
@@ -192,58 +239,37 @@ class BackupSet:
     """
     
     def __init__(self, name, config):
-        self.disabled = False
+        """
+            Creates a new Backup Set object
+            
+            @param name string: the name of this set
+            @param object config: the JabsConfig object
+        """
         self.name = name
-        self.backuplist = None
-        self.deletelist = ""
-        self.ionice = 0
-        self.nice = 0
-        self.rsync_opts = None
-        self.src = None
-        self.dst = None
-        self.sleep = 0
-        self.hanoi = 0
-        self.hanoiday = "1970-01-01"
-        self.hardlink = False
-        self.checkdst = False
-        self.sep = "."
-        self.pri = 0
-        self.datefile = ""
-        self.interval = ""
-        self.ping = False
-        self.runtime = "00:00:00-23:59:59"
-        self.mailto = None
-        self.mailfrom = getpass.getuser() + '@' + socket.gethostname()
-        self.mount = ""
-        self.umount = ""
         
-        self.backuplist = getConfigValue('BACKUPLIST', config, self.name).split(",")
-        self.backuplist = [ x.strip() for x in self.backuplist ]
-        self.deletelist = getConfigValue('DELETELIST', config, self.name, self.deletelist).split(",")
-        self.deletelist = [ x.strip() for x in self.deletelist ]
-        self.ionice = int(getConfigValue('IONICE', config, self.name, self.ionice))
-        self.nice = int(getConfigValue('NICE', config, self.name, self.nice))
-        self.rsync_opts = getConfigValue('RSYNC_OPTS', config, self.name).split(",")
-        self.rsync_opts = [ x.strip() for x in self.rsync_opts ]
-        self.src = getConfigValue('SRC', config, self.name)
-        self.dst = getConfigValue('DST', config, self.name)
-        self.sleep = int(getConfigValue('SLEEP', config, self.name, self.sleep))
-        self.hanoi = int(getConfigValue('HANOI', config, self.name, self.hanoi))
-        self.hanoiday = getConfigValue('HANOIDAY', config, self.name, self.hanoiday)
-        self.hanoiday = wrapper(date, map(int, self.hanoiday.split('-',3)))
-        self.hardlink = bool(getConfigValue('HARDLINK', config, self.name, self.hardlink))
-        self.checkdst = bool(getConfigValue('CHECKDST', config, self.name, self.checkdst))
-        self.sep = getConfigValue('SEP', config, self.name, self.sep)
-        self.pri = int(getConfigValue('PRI', config, self.name, self.pri))
-        self.datefile = getConfigValue('DATEFILE', config, self.name, self.datefile)
-        self.interval = parseInterval(getConfigValue('INTERVAL', config, self.name, self.interval))
-        self.ping = bool(getConfigValue('PING', config, self.name, self.ping))
-        self.runtime = parseTwoTimes(getConfigValue('RUNTIME', config, self.name, self.runtime))
-        self.mailto = splitAndTrim(getConfigValue('MAILTO', config, self.name, self.mailto))
-        self.mailfrom = getConfigValue('MAILFROM', config, self.name, self.mailfrom)
-        self.mount = getConfigValue('MOUNT', config, self.name, self.mount)
-        self.umount = getConfigValue('UMOUNT', config, self.name, self.umount)
-        self.disabled = bool(getConfigValue('DISABLED', config, self.name, self.disabled))
+        self.backuplist = config.getlist('BACKUPLIST', self.name)
+        self.deletelist = config.getlist('DELETELIST', self.name, [])
+        self.ionice = config.getint('IONICE', self.name, 0)
+        self.nice = config.getint('NICE', self.name, 0)
+        self.rsync_opts = config.getlist('RSYNC_OPTS', self.name)
+        self.src = config.getstr('SRC', self.name)
+        self.dst = config.getstr('DST', self.name)
+        self.sleep = config.getint('SLEEP', self.name, 0)
+        self.hanoi = config.getint('HANOI', self.name, 0)
+        self.hanoiday = config.getdate('HANOIDAY', self.name, date(1970,1,1))
+        self.hardlink = config.getboolean('HARDLINK', self.name, False)
+        self.checkdst = config.getboolean('CHECKDST', self.name, False)
+        self.sep = config.getstr('SEP', self.name, '.')
+        self.pri = config.getint('PRI', self.name, 0)
+        self.datefile = config.getstr('DATEFILE', self.name, None)
+        self.interval = config.getinterval('INTERVAL', self.name, None)
+        self.ping = config.getboolean('PING', self.name, False)
+        self.runtime = config.gettimerange('RUNTIME', self.name, [time(0,0,0),time(23,59,59)])
+        self.mailto = config.getlist('MAILTO', self.name, None)
+        self.mailfrom = config.getstr('MAILFROM', self.name, getpass.getuser() + '@' + socket.gethostname())
+        self.mount = config.getstr('MOUNT', self.name, None)
+        self.umount = config.getstr('UMOUNT', self.name, None)
+        self.disabled = config.getboolean('DISABLED', self.name, False)
 
 # ----------------------------------------------------------
 
@@ -285,7 +311,7 @@ if options.quiet:
 #    parser.print_help()
 
 # Reads the config file
-config = ConfigParser.ConfigParser()
+config = JabsConfig()
 try:
     config.readfp(open(options.configfile))
 except IOError:
@@ -319,7 +345,7 @@ del newsets
 sets = sorted(sets, key=lambda s: s.pri)
 
 #Read the PIDFILE
-pidfile = getConfigValue('PIDFILE', config, None)
+pidfile = config.getstr('PIDFILE')
 
 # Check if another insnance of the script is already running
 if os.path.isfile(pidfile):
@@ -370,7 +396,7 @@ if not options.force:
 if not options.force:
     newsets = []
     for s in sets:
-        if s.interval > timedelta(seconds=0):
+        if s.interval and s.interval > timedelta(seconds=0):
             # Check if its time to run this set
             if options.debug > 0:
                 print "Will run", s.name, "every", s.interval
@@ -501,7 +527,7 @@ for s in sets:
     # Put a file cointaining backup date on dest dir
     tmpdir = tempfile.mkdtemp()
     tmpfile = None
-    if len(s.datefile):
+    if s.datefile:
         if options.safe:
             sl.add("Skipping creation of datefile", s.datefile)
         else:
@@ -644,7 +670,7 @@ for s in sets:
             shutil.rmtree(deldest)
 
     # Save last backup execution time
-    if s.interval > timedelta(seconds=0):
+    if s.interval and s.interval > timedelta(seconds=0):
         if options.safe:
             sl.add("Skipping write of last backup timestamp")
         else:
