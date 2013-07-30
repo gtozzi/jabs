@@ -59,7 +59,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.1"
+version = "jabs v.1.2"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -174,17 +174,44 @@ class JabsConfig(ConfigParser.ConfigParser):
         else:
             raise RuntimeError("Unvalid vtype %s" % vtype)
 
-    def __get(self, name, section=NotImplemented, default=NotImplemented, vtype='str'):
+    def __get(self, name, section=NotImplemented, default=NotImplemented, vtype='str', multi=False):
         """
             Get an option value for the named section.
             If section is missing, uses the Global section.
             If value is missing, and a default value is passed, return default.
+            NotImplemented is used in place of None to allow passing None as default value.
             All values are stripped before bein' returned.
             Converts the value to given vtype: string, int, bool, list, date
+            
+            If multi is set to true, looks for multiple names in the format
+            name_XX and returns a list of items of the requested vtype merging
+            all names together
         """
         if section is NotImplemented:
             section = self.BASE_SECTION
         
+        # Look for all the keys named like the one specified
+        if multi:
+            retlist = []
+            multi_keys = {}
+            for sec in (self.BASE_SECTION, section):
+                for opt in self.options(sec):
+                    if opt[:len(name)] == name.lower():
+                        multi_keys[opt.upper()] = sec
+            
+            def sort_key(i):
+                s = i.split('_')
+                try:
+                    return int(s[1])
+                except IndexError:
+                    return 0
+            
+            for k in sorted(multi_keys.keys(), key=sort_key):
+                retlist.append(self.__getInType(k, multi_keys[k], vtype))
+            
+            return retlist
+        
+        # Standard lookup
         try:
             return self.__getInType(name, section, vtype)
         except(ConfigParser.NoSectionError, ConfigParser.NoOptionError):
@@ -196,42 +223,42 @@ class JabsConfig(ConfigParser.ConfigParser):
                 else:
                     raise ValueError("Error parsing config file: option %s not found." % name)
     
-    def getstr(self, name, section=NotImplemented, default=NotImplemented):
+    def getstr(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, returning a string """
-        return self.__get(name, section, default, 'str')
+        return self.__get(name, section, default, 'str', multi)
     
-    def getint(self, name, section=NotImplemented, default=NotImplemented):
+    def getint(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but also formats value as int """
-        return self.__get(name, section, default, 'int')
+        return self.__get(name, section, default, 'int', multi)
     
-    def getlist(self, name, section=NotImplemented, default=NotImplemented):
+    def getlist(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """
             Same as __get, but returns a list from a comma-separated string.
             Also strips every element of the list.
         """
-        return self.__get(name, section, default, 'list')
+        return self.__get(name, section, default, 'list', multi)
     
-    def getfloat(self, name, section=NotImplemented, default=NotImplemented):
+    def getfloat(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         raise NotImplementedError('Method not implemented')
     
-    def getboolean(self, name, section=NotImplemented, default=NotImplemented):
+    def getboolean(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but also formats value as boolean """
-        return self.__get(name, section, default, 'bool')
+        return self.__get(name, section, default, 'bool', multi)
     
-    def getdate(self, name, section=NotImplemented, default=NotImplemented):
+    def getdate(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but returns a date from the format YYYY-MM-DD """
-        return self.__get(name, section, default, 'date')
+        return self.__get(name, section, default, 'date', multi)
     
-    def getinterval(self, name, section=NotImplemented, default=NotImplemented):
+    def getinterval(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but returns a timedelta from a string interval """
-        return self.__get(name, section, default, 'interval')
+        return self.__get(name, section, default, 'interval', multi)
     
-    def gettimerange(self, name, section=NotImplemented, default=NotImplemented):
+    def gettimerange(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """
             Same as __get, but returns a list with two time objects representing
             a time range form a string in the format hh:mm:ss-hh:mm:ss
         """
-        return self.__get(name, section, default, 'timerange')
+        return self.__get(name, section, default, 'timerange', multi)
 
 class BackupSet:
     """
@@ -270,6 +297,7 @@ class BackupSet:
         self.mount = config.getstr('MOUNT', self.name, None)
         self.umount = config.getstr('UMOUNT', self.name, None)
         self.disabled = config.getboolean('DISABLED', self.name, False)
+        self.pre = config.getstr('PRE', self.name, None, True)
 
 # ----------------------------------------------------------
 
@@ -600,6 +628,16 @@ for s in sets:
     
     tarlogs = []
     setsuccess = True
+    
+    if s.pre:
+        # Pre-backup tasks
+        for p in s.pre:
+            sl.add("Running pre-backup task: %s" % p)
+            ret = subprocess.call(p, shell=True)
+            if ret != 0:
+                sl.add("ERROR: %s failed with return code %i" % (p, ret), lvl=-2)
+                setsuccess=False
+    
     for d in s.backuplist:
         sl.add("Backing up", d, "on", s.name, "...")
         tarlogfile = None
