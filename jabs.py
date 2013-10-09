@@ -59,7 +59,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.2"
+version = "jabs v.1.3"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -293,7 +293,7 @@ class BackupSet:
         self.ping = config.getboolean('PING', self.name, False)
         self.runtime = config.gettimerange('RUNTIME', self.name, [time(0,0,0),time(23,59,59)])
         self.mailto = config.getlist('MAILTO', self.name, None)
-        self.mailfrom = config.getstr('MAILFROM', self.name, getpass.getuser() + '@' + socket.gethostname())
+        self.mailfrom = config.getstr('MAILFROM', self.name, getpass.getuser() + '@' + socket.getfqdn())
         self.mount = config.getstr('MOUNT', self.name, None)
         self.umount = config.getstr('UMOUNT', self.name, None)
         self.disabled = config.getboolean('DISABLED', self.name, False)
@@ -304,7 +304,7 @@ class BackupSet:
 # ------------ INIT ---------------------------------------
 
 # Init some useful variables
-hostname = socket.gethostname()
+hostname = socket.getfqdn()
 username = getpass.getuser()
 starttime = datetime.now()
 
