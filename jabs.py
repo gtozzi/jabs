@@ -59,13 +59,13 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.3"
+version = "jabs v.1.3.1"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
 rpat = re.compile('{setname}')
 rdir = re.compile('{dirname}')
-risremote = re.compile('(.*@.*):(.*)')
+risremote = re.compile('(.*@.*):{1,2}(.*)')
 rlsparser = re.compile('^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2})\s+(.+)$')
 
 # ------------ FUNCTIONS AND CLASSES ----------------------
@@ -298,6 +298,9 @@ class BackupSet:
         self.umount = config.getstr('UMOUNT', self.name, None)
         self.disabled = config.getboolean('DISABLED', self.name, False)
         self.pre = config.getstr('PRE', self.name, None, True)
+        
+        self.remsrc = risremote.match(self.src)
+        self.remdst = risremote.match(self.dst)
 
 # ----------------------------------------------------------
 
@@ -458,9 +461,8 @@ if not options.force:
 # Ping hosts if required
 newsets = []
 for s in sets:
-    rem = risremote.match(s.src)
-    if s.ping and rem:
-        host = rem.group(1).split('@')[1]
+    if s.ping and s.remsrc:
+        host = s.remsrc.group(1).split('@')[1]
         if options.debug > 0:
             print "Pinging host", host
         FNULL = open('/dev/null', 'w')
@@ -583,12 +585,11 @@ for s in sets:
     plink = []
     if s.hardlink:
         # Seek for most recent backup set to hard link
-        rem = risremote.match(s.dst)
-        if rem:
+        if s.remsrc:
             #Backing up to a remote path
-            (path, base) = os.path.split(rem.group(2))
-            sl.add("Backing up to remote path:", rem.group(1), rem.group(2), lvl=1)
-            cmd = ["ssh", "-o", "BatchMode=true", rem.group(1), "ls -l --color=never --time-style=long-iso -t -1 \"" + path + "\"" ]
+            (path, base) = os.path.split(s.remsrc.group(2))
+            sl.add("Backing up to remote path:", s.remsrc.group(1), s.remsrc.group(2), lvl=1)
+            cmd = ["ssh", "-o", "BatchMode=true", s.remsrc.group(1), "ls -l --color=never --time-style=long-iso -t -1 \"" + path + "\"" ]
             sl.add("Issuing remote command:", cmd)
             p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             stdout, stderr = p.communicate()
@@ -724,7 +725,7 @@ for s in sets:
             CACHEFILE.close()
     
     # Create backup symlink, is using hanoi and not remote
-    if len(hanoisuf)>0 and not rem:
+    if len(hanoisuf)>0 and not s.remdst:
         if os.path.exists(s.dst) and S_ISLNK(os.lstat(s.dst)[ST_MODE]):
             if options.safe:
                 sl.add("Skipping deletion of old symlink", s.dst)
