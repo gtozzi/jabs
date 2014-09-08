@@ -70,14 +70,6 @@ rlsparser = re.compile('^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+
 
 # ------------ FUNCTIONS AND CLASSES ----------------------
 
-def ifelse(condition, ifTrue, ifFalse):
-    """
-        Simulates ternary operator
-    """
-    if condition:
-        return ifTrue
-    else:
-        return ifFalse
 
 def wrapper(func, args):
     """
@@ -85,6 +77,7 @@ def wrapper(func, args):
         func
     """
     return func(*args)
+
 
 class MyLogger:
     """ Custom logger class
@@ -135,6 +128,7 @@ class MyLogger:
             if l[1] <= lvl:
                 retstr += l[0] + "\n"
         return retstr
+
 
 class JabsConfig(ConfigParser.ConfigParser):
     """
@@ -259,6 +253,7 @@ class JabsConfig(ConfigParser.ConfigParser):
             a time range form a string in the format hh:mm:ss-hh:mm:ss
         """
         return self.__get(name, section, default, 'timerange', multi)
+
 
 class BackupSet:
     """
@@ -660,7 +655,7 @@ for s in sets:
             cmdr.append(tmpfile)
         else:
             cmdr.append(rdir.sub(d, s.src))
-        cmdr.append(rdir.sub(d, s.dst+ifelse(len(hanoisuf)>0,s.sep+hanoisuf,"")))
+        cmdr.append(rdir.sub(d, s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") ))
         
         if s.ionice != 0:
             cmd.extend(cmdi)
@@ -703,7 +698,7 @@ for s in sets:
 
     # Delete dirs from deletelist
     for d in s.deletelist:
-        deldest = s.dst + ifelse(len(hanoisuf)>0,s.sep+hanoisuf,"") + os.sep + d
+        deldest = s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") + os.sep + d
         if os.path.exists(deldest) and os.path.isdir(deldest):
             sl.add('DELETING folder in deletelist %s' % deldest)
             shutil.rmtree(deldest)
