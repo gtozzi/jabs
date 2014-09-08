@@ -59,7 +59,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.3.1"
+version = "jabs v.1.3.2"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -296,6 +296,7 @@ class BackupSet:
         
         self.remsrc = risremote.match(self.src)
         self.remdst = risremote.match(self.dst)
+
 
 # ----------------------------------------------------------
 
@@ -580,11 +581,11 @@ for s in sets:
     plink = []
     if s.hardlink:
         # Seek for most recent backup set to hard link
-        if s.remsrc:
+        if s.remdst:
             #Backing up to a remote path
-            (path, base) = os.path.split(s.remsrc.group(2))
-            sl.add("Backing up to remote path:", s.remsrc.group(1), s.remsrc.group(2), lvl=1)
-            cmd = ["ssh", "-o", "BatchMode=true", s.remsrc.group(1), "ls -l --color=never --time-style=long-iso -t -1 \"" + path + "\"" ]
+            (path, base) = os.path.split(s.remdst.group(2))
+            sl.add("Backing up to remote path:", s.remdst.group(1), s.remdst.group(2), lvl=1)
+            cmd = ["ssh", "-o", "BatchMode=true", s.remdst.group(1), "ls -l --color=never --time-style=long-iso -t -1 \"" + path + "\"" ]
             sl.add("Issuing remote command:", cmd)
             p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             stdout, stderr = p.communicate()
