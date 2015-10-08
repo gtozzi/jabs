@@ -1,5 +1,6 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
+# kate: space-indent on; tab-indent off;
 
 """ @package docstring
 JABS - Just Another Backup Script
@@ -293,6 +294,7 @@ class BackupSet:
         self.umount = config.getstr('UMOUNT', self.name, None)
         self.disabled = config.getboolean('DISABLED', self.name, False)
         self.pre = config.getstr('PRE', self.name, None, True)
+        self.skiponpreerror = config.getboolean('SKIPONPREERROR', self.name, None, False)
 
         self.remsrc = risremote.match(self.src)
         self.remdst = risremote.match(self.dst)
@@ -617,12 +619,20 @@ for s in sets:
 
     if s.pre:
         # Pre-backup tasks
+        goon = False
         for p in s.pre:
             sl.add("Running pre-backup task: %s" % p)
             ret = subprocess.call(p, shell=True)
             if ret != 0:
                 sl.add("ERROR: %s failed with return code %i" % (p, ret), lvl=-2)
                 setsuccess=False
+                if s.skiponpreerror:
+                    sl.add("ERROR: Skipping", s.name, "set, SKIPONPREERROR is set.", lvl=-2)
+                    break
+        else:
+            goon = True
+        if not goon:
+            continue
 
     if s.checkdst:
         # Checks whether the given backup destination exists
