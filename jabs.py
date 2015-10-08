@@ -1,5 +1,4 @@
-#! /usr/bin/env python
-# -*- coding: utf-8 -*-
+#! /usr/bin/env python3
 # kate: space-indent off; tab-indent on;
 
 """ @package docstring
@@ -49,7 +48,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 import os, sys, socket, subprocess, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
 from optparse import OptionParser
-import ConfigParser
+import configparser
 from string import Template
 from time import sleep, mktime
 from datetime import datetime, date, timedelta, time
@@ -60,7 +59,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.4"
+version = "jabs v.2.0-pre-aplha"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -119,7 +118,7 @@ class MyLogger:
 		if len(outstr):
 			outstr = outstr[:-1]
 		if lvl <= self.debuglvl and not ( 'noprint' in kwargs and kwargs['noprint'] ):
-			print outstr
+			print(outstr)
 		self.logs.append([outstr, lvl])
 
 	def getstr(self,lvl=0):
@@ -131,7 +130,7 @@ class MyLogger:
 		return retstr
 
 
-class JabsConfig(ConfigParser.ConfigParser):
+class JabsConfig(configparser.ConfigParser):
 	"""
 		Custom configuration parser
 	"""
@@ -141,18 +140,18 @@ class JabsConfig(ConfigParser.ConfigParser):
 	def __getInType(self, name, section, vtype):
 		""" Internal function called by __get """
 		if vtype == 'str':
-			return ConfigParser.ConfigParser.get(self, section, name).strip()
+			return configparser.ConfigParser.get(self, section, name).strip()
 		elif vtype == 'int':
-			return ConfigParser.ConfigParser.getint(self, section, name)
+			return configparser.ConfigParser.getint(self, section, name)
 		elif vtype == 'bool':
-			return ConfigParser.ConfigParser.getboolean(self, section, name)
+			return configparser.ConfigParser.getboolean(self, section, name)
 		elif vtype == 'list':
-			return [ x.strip() for x in ConfigParser.ConfigParser.get(self, section, name).strip().split(self.LIST_SEP) ]
+			return [ x.strip() for x in configparser.ConfigParser.get(self, section, name).strip().split(self.LIST_SEP) ]
 		elif vtype == 'date':
-			return wrapper(date, map(int, ConfigParser.ConfigParser.get(self, section, name).strip().split('-',3)))
+			return wrapper(date, map(int, configparser.ConfigParser.get(self, section, name).strip().split('-',3)))
 		elif vtype == 'interval':
-			string = ConfigParser.ConfigParser.get(self, section, name).strip()
-			d, h, m, s = (0 for x in xrange(4))
+			string = configparser.ConfigParser.get(self, section, name).strip()
+			d, h, m, s = (0 for x in range(4))
 			if len(string):
 				for i in string.split():
 					if i[-1] == 's':
@@ -165,7 +164,7 @@ class JabsConfig(ConfigParser.ConfigParser):
 						d = int(i[:-1])
 			return timedelta(days=d,hours=h,minutes=m,seconds=s)
 		elif vtype == 'timerange':
-			return map(lambda s: wrapper(time,map(int,s.split(':'))), ConfigParser.ConfigParser.get(self, section, name).strip().split('-'))
+			return map(lambda s: wrapper(time,map(int,s.split(':'))), configparser.ConfigParser.get(self, section, name).strip().split('-'))
 		else:
 			raise RuntimeError("Unvalid vtype %s" % vtype)
 
@@ -209,10 +208,10 @@ class JabsConfig(ConfigParser.ConfigParser):
 		# Standard lookup
 		try:
 			return self.__getInType(name, section, vtype)
-		except(ConfigParser.NoSectionError, ConfigParser.NoOptionError):
+		except(configparser.NoSectionError, configparser.NoOptionError):
 			try:
 				return self.__getInType(name, self.BASE_SECTION, vtype)
-			except ConfigParser.NoOptionError as e:
+			except configparser.NoOptionError as e:
 				if default is not NotImplemented:
 					return default
 				else:
@@ -344,14 +343,14 @@ config = JabsConfig()
 try:
 	config.readfp(open(options.configfile))
 except IOError:
-	print "ERROR: Couldn't open config file", options.configfile
+	print("ERROR: Couldn't open config file", options.configfile)
 	parser.print_help()
 	sys.exit(1)
 
 # Reads settings from the config file
 sets = config.sections()
 if sets.count("Global") < 1:
-	print "ERROR: Global section on config file not found"
+	print("ERROR: Global section on config file not found")
 	sys.exit(1)
 sets.remove("Global")
 
@@ -361,7 +360,7 @@ if args:
 	sets[:] = [s for s in sets if s.lower() in lower_args]
 
 if options.debug > 0:
-	print "Will run these backup sets:", sets
+	print("Will run these backup sets:", sets)
 
 #Init backup sets
 newsets = []
@@ -389,14 +388,14 @@ if os.path.isfile(pidfile):
 		if options.batch:
 			sys.exit(0)
 		else:
-			print "Error: this script is already running!"
+			print("Error: this script is already running!")
 			sys.exit(12)
 
 # Save my PID on pidfile
 try:
 	PIDFILE = open(pidfile, "w")
 except:
-	print "Error: couldn't open PID file", pidfile
+	print("Error: couldn't open PID file", pidfile)
 	sys.exit(15)
 PIDFILE.write(str(os.getpid()))
 PIDFILE.flush()
@@ -415,7 +414,7 @@ if not options.force:
 	for s in sets:
 		if s.runtime[0] > starttime.time() or s.runtime[1] < starttime.time():
 			if options.debug > 0:
-				print "Skipping set", s.name, "because out of runtime (", s.runtime[0].isoformat(), "-", s.runtime[1].isoformat(), ")"
+				print("Skipping set", s.name, "because out of runtime (", s.runtime[0].isoformat(), "-", s.runtime[1].isoformat(), ")")
 		else:
 			newsets.append(s)
 	sets = newsets
@@ -428,28 +427,28 @@ if not options.force:
 		if s.interval and s.interval > timedelta(seconds=0):
 			# Check if its time to run this set
 			if options.debug > 0:
-				print "Will run", s.name, "every", s.interval
+				print("Will run", s.name, "every", s.interval)
 			cachefile = options.cachedir + "/" + s.name
 			if not os.path.exists(options.cachedir):
-				print "WARNING: Cache directory missing, creating it"
+				print("WARNING: Cache directory missing, creating it")
 				os.mkdir(os.path.dirname(cachefile))
 			if not os.path.exists(cachefile):
 				lastdone = datetime.fromtimestamp(0)
-				print "WARNING: Last backup timestamp for", s.name, "is missing. Assuming 01-01-1970"
+				print("WARNING: Last backup timestamp for", s.name, "is missing. Assuming 01-01-1970")
 			else:
 				CACHEFILE = open(cachefile,'r')
 				try:
 					lastdone = datetime.fromtimestamp(int(CACHEFILE.readline()))
 				except ValueError:
-					print "WARNING: Last backup timestamp for", s.name, "corrupted. Assuming 01-01-1970"
+					print("WARNING: Last backup timestamp for", s.name, "corrupted. Assuming 01-01-1970")
 					lastdone = datetime.fromtimestamp(0)
 				CACHEFILE.close()
 			if options.debug > 0:
-				print "Last", s.name, "run:", lastdone
+				print("Last", s.name, "run:", lastdone)
 
 			if lastdone + s.interval > starttime:
 				if options.debug > 0:
-					print "Skipping set", s.name, "because interval not reached (", str(lastdone+s.interval-starttime), "still remains )"
+					print("Skipping set", s.name, "because interval not reached (", str(lastdone+s.interval-starttime), "still remains )")
 			else:
 				newsets.append(s)
 
@@ -462,16 +461,16 @@ for s in sets:
 	if s.ping and s.remsrc:
 		host = s.remsrc.group(1).split('@')[1]
 		if options.debug > 0:
-			print "Pinging host", host
+			print("Pinging host", host)
 		FNULL = open('/dev/null', 'w')
 		hup = subprocess.call(['ping', '-c 3','-n','-w 60', host], stdout=FNULL, stderr=FNULL)
 		FNULL.close()
 		if hup == 0:
 			if options.debug > -1:
-				print host, "is UP."
+				print(host, "is UP.")
 			newsets.append(s)
 		elif options.debug > 0:
-			print "Skipping backup of", host, "because it's down."
+			print("Skipping backup of", host, "because it's down.")
 	else:
 		newsets.append(s)
 
@@ -508,7 +507,7 @@ backupheader = backupheader_tpl.substitute(
 	backuplist = nicelist,
 )
 if options.debug > -1:
-	print backupheader
+	print(backupheader)
 
 # ---------------- DO THE BACKUP ---------------------------
 
@@ -686,8 +685,8 @@ for s in sets:
 			try:
 				p = subprocess.Popen(cmd,stdout=TARLOGFILE,stderr=subprocess.PIPE)
 			except OSError as e:
-				print "ERROR: Unable to locate file", e.filename
-				print "Path: ", os.environ['PATH']
+				print("ERROR: Unable to locate file", e.filename)
+				print("Path: ", os.environ['PATH'])
 				sys.exit(1)
 			stdout, stderr = p.communicate()
 			ret = p.poll()
@@ -722,7 +721,7 @@ for s in sets:
 
 			# Create cachedir if missing
 			if not os.path.exists(options.cachedir):
-				os.makedirs(options.cachedir, 0700)
+				os.makedirs(options.cachedir, 0o700)
 
 			cachefile = options.cachedir + os.sep + s.name
 			CACHEFILE = open(cachefile,'w')
@@ -825,7 +824,7 @@ for s in sets:
 
 took = datetime.now() - starttime
 if options.debug > -1:
-	print "Backup completed. Took", took
+	print("Backup completed. Took", took)
 
 sys.exit(0)
 
