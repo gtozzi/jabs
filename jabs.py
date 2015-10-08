@@ -59,7 +59,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.3.2"
+version = "jabs v.1.4"
 cachedir = "/var/cache/jabs"
 
 # Useful regexp
@@ -136,7 +136,7 @@ class JabsConfig(ConfigParser.ConfigParser):
     """
     BASE_SECTION = 'Global'
     LIST_SEP = ','
-    
+
     def __getInType(self, name, section, vtype):
         """ Internal function called by __get """
         if vtype == 'str':
@@ -176,14 +176,14 @@ class JabsConfig(ConfigParser.ConfigParser):
             NotImplemented is used in place of None to allow passing None as default value.
             All values are stripped before bein' returned.
             Converts the value to given vtype: string, int, bool, list, date
-            
+
             If multi is set to true, looks for multiple names in the format
             name_XX and returns a list of items of the requested vtype merging
             all names together
         """
         if section is NotImplemented:
             section = self.BASE_SECTION
-        
+
         # Look for all the keys named like the one specified
         if multi:
             retlist = []
@@ -192,19 +192,19 @@ class JabsConfig(ConfigParser.ConfigParser):
                 for opt in self.options(sec):
                     if opt[:len(name)] == name.lower():
                         multi_keys[opt.upper()] = sec
-            
+
             def sort_key(i):
                 s = i.split('_')
                 try:
                     return int(s[1])
                 except IndexError:
                     return 0
-            
+
             for k in sorted(multi_keys.keys(), key=sort_key):
                 retlist.append(self.__getInType(k, multi_keys[k], vtype))
-            
+
             return retlist
-        
+
         # Standard lookup
         try:
             return self.__getInType(name, section, vtype)
@@ -216,37 +216,37 @@ class JabsConfig(ConfigParser.ConfigParser):
                     return default
                 else:
                     raise ValueError("Error parsing config file: option %s not found." % name)
-    
+
     def getstr(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, returning a string """
         return self.__get(name, section, default, 'str', multi)
-    
+
     def getint(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but also formats value as int """
         return self.__get(name, section, default, 'int', multi)
-    
+
     def getlist(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """
             Same as __get, but returns a list from a comma-separated string.
             Also strips every element of the list.
         """
         return self.__get(name, section, default, 'list', multi)
-    
+
     def getfloat(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         raise NotImplementedError('Method not implemented')
-    
+
     def getboolean(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but also formats value as boolean """
         return self.__get(name, section, default, 'bool', multi)
-    
+
     def getdate(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but returns a date from the format YYYY-MM-DD """
         return self.__get(name, section, default, 'date', multi)
-    
+
     def getinterval(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """ Same as __get, but returns a timedelta from a string interval """
         return self.__get(name, section, default, 'interval', multi)
-    
+
     def gettimerange(self, name, section=NotImplemented, default=NotImplemented, multi=False):
         """
             Same as __get, but returns a list with two time objects representing
@@ -259,16 +259,16 @@ class BackupSet:
     """
         Backup set class
     """
-    
+
     def __init__(self, name, config):
         """
             Creates a new Backup Set object
-            
+
             @param name string: the name of this set
             @param object config: the JabsConfig object
         """
         self.name = name
-        
+
         self.backuplist = config.getlist('BACKUPLIST', self.name)
         self.deletelist = config.getlist('DELETELIST', self.name, [])
         self.ionice = config.getint('IONICE', self.name, 0)
@@ -293,7 +293,7 @@ class BackupSet:
         self.umount = config.getstr('UMOUNT', self.name, None)
         self.disabled = config.getboolean('DISABLED', self.name, False)
         self.pre = config.getstr('PRE', self.name, None, True)
-        
+
         self.remsrc = risremote.match(self.src)
         self.remdst = risremote.match(self.dst)
 
@@ -539,17 +539,6 @@ for s in sets:
             if ret != 0:
                 sl.add("WARNING: Mount of", s.mount, "failed with return code", ret, lvl=-1)
 
-    if s.checkdst:
-        # Checks whether the given backup destination exists
-        try:
-            i = os.path.exists(s.dst)
-            if not i:
-                sl.add("WARNING: Skipping", s.name, "set, destination", s.dst, "not found.", lvl=-1)
-                continue
-        except:
-            sl.add("WARNING: Skipping", s.name, "set, read error on", s.dst, ".", lvl=-1)
-            continue
-
     # Put a file cointaining backup date on dest dir
     tmpdir = tempfile.mkdtemp()
     tmpfile = None
@@ -609,23 +598,23 @@ for s in sets:
                     btime = datetime.fromtimestamp(os.stat(path+"/"+d).st_mtime)
                     psets.append([d,btime])
             psets = sorted(psets, key=lambda pset: pset[1], reverse=True) #Sort by age
-        
+
         for p in psets:
             sl.add("Found previous backup:", p[0], "(", p[1], ")", lvl=1)
             if p[0] != base + s.sep + hanoisuf:
                 plink.append(path + "/" + p[0])
-        
+
         if len(plink):
             sl.add("Will hard link against", plink)
         else:
             sl.add("Will NOT use hard linking (no suitable set found)")
-    
+
     else:
         sl.add("Will NOT use hark linking (disabled)")
-    
+
     tarlogs = []
     setsuccess = True
-    
+
     if s.pre:
         # Pre-backup tasks
         for p in s.pre:
@@ -634,7 +623,18 @@ for s in sets:
             if ret != 0:
                 sl.add("ERROR: %s failed with return code %i" % (p, ret), lvl=-2)
                 setsuccess=False
-    
+
+    if s.checkdst:
+        # Checks whether the given backup destination exists
+        try:
+            i = os.path.exists(s.dst)
+            if not i:
+                sl.add("WARNING: Skipping", s.name, "set, destination", s.dst, "not found.", lvl=-1)
+                continue
+        except:
+            sl.add("WARNING: Skipping", s.name, "set, read error on", s.dst, ".", lvl=-1)
+            continue
+
     for d in s.backuplist:
         sl.add("Backing up", d, "on", s.name, "...")
         tarlogfile = None
@@ -642,9 +642,8 @@ for s in sets:
             tarlogfile = tmpdir + '/' + re.sub(r'(\/|\.)', '_', s.name + '-' + d) + '.log'
         if not options.safe:
             tarlogs.append(tarlogfile)
-        
+
         #Build command line
-        
         cmd, cmdi, cmdn, cmdr = ([] for x in xrange(4))
         cmdi.extend(["ionice", "-c", str(s.ionice)])
         cmdn.extend(["nice", "-n", str(s.nice)])
@@ -657,20 +656,20 @@ for s in sets:
         else:
             cmdr.append(rdir.sub(d, s.src))
         cmdr.append(rdir.sub(d, s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") ))
-        
+
         if s.ionice != 0:
             cmd.extend(cmdi)
         if s.nice != 0:
             cmd.extend(cmdn)
         cmd.extend(cmdr)
-        
+
         if options.safe:
             nlvl = 0
         else:
             nlvl = 1
         sl.add("Commandline:", cmd, lvl=nlvl)
         sl.add("Will write tar STDOUT to", tarlogfile, lvl=1)
-        
+
         if not options.safe:
             sys.stdout.flush()
             TARLOGFILE = open(tarlogfile, 'wb')
@@ -689,7 +688,7 @@ for s in sets:
             if len(stderr):
                 sl.add("ERROR: stderr was not empty:", -1)
                 sl.add(stderr, -1)
-    
+
         if s.sleep > 0:
             if options.safe:
                 sl.add("Should sleep", s.sleep, "secs now, skipping.")
@@ -710,16 +709,16 @@ for s in sets:
             sl.add("Skipping write of last backup timestamp")
         else:
             sl.add("Writing last backup timestamp", lvl=1)
-            
+
             # Create cachedir if missing
             if not os.path.exists(options.cachedir):
                 os.makedirs(options.cachedir, 0700)
-            
+
             cachefile = options.cachedir + os.sep + s.name
             CACHEFILE = open(cachefile,'w')
             CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
             CACHEFILE.close()
-    
+
     # Create backup symlink, is using hanoi and not remote
     if len(hanoisuf)>0 and not s.remdst:
         if os.path.exists(s.dst) and S_ISLNK(os.lstat(s.dst)[ST_MODE]):
@@ -739,7 +738,7 @@ for s in sets:
 
     stooktime = datetime.now() - sstarttime
     sl.add("Set", s.name, "completed. Took:", stooktime)
-    
+
     # Umount
     if s.umount:
         if not os.path.ismount(s.umount):
@@ -775,7 +774,7 @@ for s in sets:
             msg['From'] = m_from
             msg['To'] = ', '.join(s.mailto)
             msg.preamble = 'This is a milti-part message in MIME format.'
-            
+
             # Aggiungo il testo base
             txt = sl.getstr() + "\n\nDetailed logs are attached.\n"
             txt = MIMEText(txt)
@@ -793,7 +792,7 @@ for s in sets:
                         filename=os.path.basename(tl)
                     )
                     msg.attach(att)
-            
+
             # Invio il messaggio
             smtp = smtplib.SMTP()
             smtp.connect()
