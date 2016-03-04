@@ -47,6 +47,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import os
 import sys
+import psutil
 import socket
 import getpass
 import logging
@@ -65,6 +66,11 @@ DEFAULT_CONFIG = {
 
 
 class ConfigurationError(Exception):
+	''' Simple exception raised when there is a configuration error '''
+	pass
+
+class CannotLockError(Exception):
+	''' Exception raised when lock couldn't be acquired '''
 	pass
 
 
@@ -75,7 +81,9 @@ class BackupSet:
 	ALLDAY = ( datetime.time(0,0,0), datetime.time(23,59,59) )
 
 	def __init__(self, name, config):
-		''' Reads the config section and inits the backup set '''
+		''' Reads the config section and inits the backup set
+		@throws ConfigurationError
+		'''
 		self.name = name
 
 		## List of folders to be backed up
@@ -147,16 +155,19 @@ class Jabs:
 			pidFile=DEFAULT_CONFIG['pidfile'],
 			cacheDir=DEFAULT_CONFIG['cachedir']):
 
+		self.pidFile = PidFile(pidFile)
+		self.cacheDir = cacheDir
+
 		# Init logger
 		self.log = logging.getLogger('jabs')
 
 		# Reads configuration
 		self.log.debug('Reading config from file %s', configFile)
 		if not os.path.isfile(configFile):
-			raise ConfigurationError("file {} does not exist".format(configFile))
+			raise ConfigurationError('Config file "{}" does not exist'.format(configFile))
 		self.config = configparser.ConfigParser()
 		if configFile not in self.config.read(configFile):
-			raise ConfigurationError("Couldn't load file {}".format(configFile))
+			raise ConfigurationError('Couldn\'t load config file "{}"'.format(configFile))
 
 		# Checks for correct config version
 		try:
@@ -172,10 +183,43 @@ class Jabs:
 				continue
 
 			if name in self.sets.keys():
-				raise ConfigurationError("Duplicate definition for set {}".format(name))
+				raise ConfigurationError('Duplicate definition for set "{}"'.format(name))
 
 			s = BackupSet(name, ConfigSection(self.config, name))
-			self.log.debug("Loaded set: {}".format(s))
+			self.log.debug('Loaded set: {}'.format(s))
+
+		# Rough validtaion on cacheDir
+		if not os.path.exists(self.cacheDir):
+			raise ConfigurationError('Cache directory "{}" does not exist'.format(self.cacheDir))
+		if not os.path.isdir(self.cacheDir):
+			raise ConfigurationError('Cache directory "{}" is not a folder'.format(self.cacheDir))
+		if not os.access(self.cacheDir, os.R_OK | os.W_OK | os.X_OK):
+			raise ConfigurationError('Cache directory "{}" is not accessible'.format(self.cacheDir))
+
+	def __enter__(self):
+		''' Try to acquire the lock '''
+		self.acquireLock()
+		return self
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		self.releaseLock()
+
+	def run(self):
+		''' Do the backups '''
+		self.acquireLock()
+		while True:
+			pass
+
+	def acquireLock(self):
+		''' Try to acquire the lock
+		@throws CannotLockError
+		'''
+		if not self.pidFile.lock():
+			raise CannotLockError('Another instance is already running')
+
+	def releaseLock(self):
+		''' Release the lock, if any '''
+		self.pidFile.unlock()
 
 
 class NoDefault:
@@ -311,6 +355,54 @@ class ConfigSection:
 					'in set "{}"'.format(ret, name, self.name))
 
 
+class PidFile:
+	''' Class for handling a PID file '''
+
+	def __init__(self, path):
+		self.path = path
+		self.locked = False
+
+	def lock(self):
+		''' Try to acquire the lock, returns true on success or if already locked '''
+		if self.locked:
+			return True
+
+		# Open the file for rw or create a new one if missing
+		if os.path.exists(self.path):
+			mode = 'r+t'
+		else:
+			mode = 'wt'
+
+		with open(self.path, mode, newline=None) as pidFile:
+			curPid = os.getpid()
+			pid = None
+
+			if mode.startswith('r'):
+				try:
+					pid = int(pidFile.readline().strip())
+				except ValueError:
+					pass
+
+			if pid is not None:
+				# Found a pid stored in the pid file, check if its still running
+				if psutil.pid_exists(pid):
+					return False
+
+			pidFile.seek(0)
+			pidFile.truncate()
+			print("{}".format(curPid), file=pidFile)
+
+		self.locked = True
+		return True
+
+	def unlock(self):
+		''' Release the lock, if any '''
+		if not self.locked:
+			return False
+
+		os.remove(self.path)
+		return True
+
 
 if __name__ == '__main__':
 	import argparse
@@ -359,18 +451,24 @@ if __name__ == '__main__':
 	logging.basicConfig(level=verbosity)
 
 	try:
-		jabs = Jabs(
+		with Jabs(
 			configFile = args.configfile,
 			pidFile = args.pidfile,
 			cacheDir = args.cachedir,
 			force = args.force,
 			batch = args.batch,
 			safe = args.safe
-		)
+		) as jabs:
+			jabs.run()
 	except ConfigurationError as e:
 		# Invalid configuration
 		print("CONFIGURATION ERROR: {}".format(e))
 		sys.exit(2)
+	except CannotLockError as e:
+		# Instance already running
+		if not args.batch:
+			print("LOCK ERROR: {}".format(e))
+			sys.exit(3)
 	except Exception as e:
 		# A generic error
 		if verbosity >= logging.DEBUG:
