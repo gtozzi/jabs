@@ -46,12 +46,15 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import os
+import re
 import sys
 import psutil
 import socket
 import getpass
 import logging
 import datetime
+import subprocess
+import collections
 import configparser
 
 
@@ -97,9 +100,9 @@ class BackupSet:
 		## Rsync command line options
 		self.rsyncOpts = config.getList('RSYNC_OPTS')
 		## Source folder/path to read from
-		self.src = config.getStr('SRC')
+		self.src = config.getPath('SRC')
 		## Destination folder/path to backup to
-		self.dst = config.getStr('DST')
+		self.dst = config.getPath('DST')
 		## Sleep tinterval in seconds between every dir
 		self.sleep = config.getInt('SLEEP', 0)
 		## Number of sets to use for Hanoi rotation (0=disabled)
@@ -119,7 +122,7 @@ class BackupSet:
 		## Minimum time interval between two backups
 		self.interval = config.getInterval('INTERVAL', None)
 		## Ping destination before backup, run it only if succesful
-		self.ping = config.getBool('PING', False)
+		ping = config.getBool('PING', False)
 		## Valid time range for starting this backup
 		self.runTime = config.getTimeRange('RUNTIME', self.ALLDAY)
 		## List of email address to notify about backup status
@@ -136,6 +139,25 @@ class BackupSet:
 		self.pre = config.getStr('PRE', [], True)
 		## Whether to skip the backup if a pre-task fails
 		self.skipOnPreError = config.getBool('SKIPONPREERROR', True)
+
+		# Validate the ping setting, replace it with the hostname
+		if not ping:
+			self.ping = None
+		else:
+			shost = self.src.getHost()
+			dhost = self.dst.getHost()
+
+			if shost and dhost:
+				raise ConfigurationError('Both src and dst are remote and ping enabled. '
+						'This is not supported')
+			elif shost:
+				self.ping = shost
+			elif dhost:
+				self.ping = dhost
+			else:
+				raise ConfigurationError('Ping is enabled but both src and dst are local. '
+						'I do not know what to ping')
+
 
 	def __str__(self):
 		desc = 'Backup Set "{}":'.format(self.name)
@@ -176,23 +198,28 @@ class Jabs:
 		except KeyError:
 			raise ConfigurationError("{} section must define a ConfigVersion=2 parameter".format(self.GLOBAL_CONFIG_SECTION))
 
-		# Loads sets
-		self.sets = {}
+		# Loads sets (except disabled ones)
+		sets = collections.OrderedDict()
 		for name in self.config.sections():
 			if name == self.GLOBAL_CONFIG_SECTION or name == 'DEFAULT':
 				continue
 
-			if name in self.sets.keys():
+			if name in sets.keys():
 				raise ConfigurationError('Duplicate definition for set "{}"'.format(name))
 
 			s = BackupSet(name, ConfigSection(self.config, name))
 			self.log.debug('Loaded set: {}'.format(s))
+			sets[s.name] = s
+
+		# Sort sets by priority
+		self.sets = collections.OrderedDict(sorted(sets.items(), key=lambda i: i[1].pri))
 
 		# Rough validtaion on cacheDir
 		if not os.path.exists(self.cacheDir):
-			raise ConfigurationError('Cache directory "{}" does not exist'.format(self.cacheDir))
+			self.log.warning('Cache directory "%s" does not exist, creating it', self.cacheDir)
+			os.mkdir(self.cacheDir)
 		if not os.path.isdir(self.cacheDir):
-			raise ConfigurationError('Cache directory "{}" is not a folder'.format(self.cacheDir))
+			raise ConfigurationError('Cache directory "%s" is not a folder', self.cacheDir)
 		if not os.access(self.cacheDir, os.R_OK | os.W_OK | os.X_OK):
 			raise ConfigurationError('Cache directory "{}" is not accessible'.format(self.cacheDir))
 
@@ -204,21 +231,100 @@ class Jabs:
 	def __exit__(self, exc_type, exc_value, traceback):
 		self.releaseLock()
 
-	def run(self):
-		''' Do the backups '''
-		self.acquireLock()
-		while True:
-			pass
+	def run(self, force=False, sets=None):
+		''' Do the backups
+		@param force if true, always execute sets regardless of the time
+		@param sets list of the names of the sets to be run, None means all
+		'''
+		self.started = datetime.datetime.now()
+		with self:
+			runSets = self.__listSetsToRun(force, sets)
+			if not runSets:
+				self.log.info('Nothing to do')
+				return
+
+	def __listSetsToRun(self, force=False, sets=None):
+		''' Returns list of sets to run
+		@param force if true, always execute sets regardless of the time
+		@param sets list of the names of the sets to be run, None means all
+		'''
+		if sets:
+			for s in sets:
+				if s not in self.sets.keys():
+					raise RuntimeError('Unknown set: "{}"'.format(s))
+
+		# Determine which sets have to be run
+		if sets is None:
+			activeSets = self.sets.values()
+		else:
+			activeSets = filter(lambda i: i.name in sets, self.sets.values())
+
+		self.log.info('Considering sets: ' + ', '.join(['"{}"'.format(x.name) for x in activeSets]))
+
+		if force:
+			self.log.warning('Force option active: ignoring time constraints')
+
+		runSets = []
+		for bs in activeSets:
+			# Check which sets should run now
+
+			if bs.disabled:
+				# Check if set is disabled
+				self.log.debug('Skipping set "%s" because it\'s disabled', bs.name)
+				continue
+
+			if not force and ( bs.runTime[0] > self.started.time() or
+					bs.runTime[1] < self.started.time() ):
+				self.log.debug('Skipping set "%s" because out of runtime (%s-%s)',
+						bs.name, bs.runTime[0].isoformat(), bs.runTime[1].isoformat())
+				continue
+
+			if not force and bs.interval and bs.interval > datetime.timedelta(seconds=0):
+				# Check if enough time has passed since last run
+				self.log.debug('Set "%s" runs every %s', bs.name, bs.interval)
+
+				cacheFile = os.path.join(self.cacheDir, bs.name.replace(os.sep,'_'))
+				if not os.path.exists(cacheFile):
+					lastDone = datetime.datetime.fromtimestamp(0)
+				else:
+					with open(cacheFile, 'rt', newline=None) as cf:
+						try:
+							ts = int(cf.readline().strip())
+							lastDone = datetime.datetime.fromtimestamp(ts)
+						except ValueError:
+							self.log.warning('Last backup timestamp for "%s" '
+									'is corrupted. Assuming 01-01-1970', bs.name)
+							lastDone = datetime.datetime.fromtimestamp(0)
+
+				self.log.debug('Last "%s" run: %s', bs.name, lastDone)
+
+				if lastDone + bs.interval > self.started:
+					self.log.debug('Skipping set "%s" because interval has not '
+							'been reached (%s still remains )', bs.name,
+							lastDone + s.interval - self.started)
+					continue
+
+			if bs.ping is not None:
+				# Perform the ping check
+				self.log.debug('Pinging host "%s"', bs.ping)
+
+			# Finally append the set to the run queue if all tests passed
+			runSets.append(bs)
+
+		self.log.info('Will run sets: ' + ', '.join(['"{}"'.format(x.name) for x in runSets]))
+		return runSets
 
 	def acquireLock(self):
 		''' Try to acquire the lock
 		@throws CannotLockError
 		'''
+		self.log.debug('Acquiring lock')
 		if not self.pidFile.lock():
 			raise CannotLockError('Another instance is already running')
 
 	def releaseLock(self):
 		''' Release the lock, if any '''
+		self.log.debug('Releasing lock')
 		self.pidFile.unlock()
 
 
@@ -291,6 +397,12 @@ class ConfigSection:
 	def getBool(self, name, default=NoDefault, multi=False):
 		return self.__get(name, default, multi, 'getboolean')
 
+	def getPath(self, name, default=NoDefault, multi=False):
+		ret = self.__get(name, default, multi)
+		if ret is default:
+			return ret
+		return Path(ret)
+
 	def getList(self, name, default=NoDefault, multi=False):
 		ret = self.__get(name, default, multi)
 		if ret is default:
@@ -355,16 +467,37 @@ class ConfigSection:
 					'in set "{}"'.format(ret, name, self.name))
 
 
+class Path:
+	''' Represents an rsync path '''
+
+	REMOTE_RE = re.compile('(.*@.*):{1,2}(.*)')
+
+	def __init__(self, path):
+		self.path = path
+
+	def __str__(self):
+		return self.path
+
+	def getHost(self):
+		''' Returns the host part, or None if this is not remote '''
+		match = self.REMOTE_RE.match(self.path)
+		if not match:
+			return None
+		return match.group(1).split('@')[1]
+
+
 class PidFile:
 	''' Class for handling a PID file '''
 
 	def __init__(self, path):
 		self.path = path
+		self.log = logging.getLogger('pid')
 		self.locked = False
 
 	def lock(self):
 		''' Try to acquire the lock, returns true on success or if already locked '''
 		if self.locked:
+			self.log.debug('Lock already acquired')
 			return True
 
 		# Open the file for rw or create a new one if missing
@@ -398,9 +531,11 @@ class PidFile:
 	def unlock(self):
 		''' Release the lock, if any '''
 		if not self.locked:
+			self.log.debug('Lock already released')
 			return False
 
 		os.remove(self.path)
+		self.locked = False
 		return True
 
 
@@ -448,7 +583,10 @@ if __name__ == '__main__':
 		verbosity = logging.INFO
 
 	# Init logging
-	logging.basicConfig(level=verbosity)
+	logging.basicConfig(
+		level = verbosity,
+		format = '%(asctime)s %(name)s.%(levelname)s: %(message)s'
+	)
 
 	try:
 		with Jabs(
@@ -459,7 +597,10 @@ if __name__ == '__main__':
 			batch = args.batch,
 			safe = args.safe
 		) as jabs:
-			jabs.run()
+			jabs.run(
+				args.force,
+				args.set if len(args.set) else None
+			)
 	except ConfigurationError as e:
 		# Invalid configuration
 		print("CONFIGURATION ERROR: {}".format(e))
