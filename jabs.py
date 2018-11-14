@@ -295,6 +295,9 @@ class BackupSet:
         self.disabled = config.getboolean('DISABLED', self.name, False)
         self.pre = config.getstr('PRE', self.name, None, True)
         self.skiponpreerror = config.getboolean('SKIPONPREERROR', self.name, None, False)
+        self.smtphost = config.getstr('SMTPHOST', self.name, None)
+        self.smtpuser = config.getstr('SMTPUSER', self.name, None)
+        self.smtppass = config.getstr('SMTPPASS', self.name, None)
 
         self.remsrc = risremote.match(self.src)
         self.remdst = risremote.match(self.dst)
@@ -768,7 +771,10 @@ for s in sets:
         if options.safe:
             sl.add("Skipping sending detailed logs to", s.mailto)
         else:
-            sl.add("Sending detailed logs to", s.mailto)
+            if s.smtphost:
+                sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost)
+            else:
+                sl.add("Sending detailed logs to", s.mailto, "using local smtp")
 
             # Creo il messaggio principale
             msg = MIMEMultipart()
@@ -804,8 +810,9 @@ for s in sets:
                     msg.attach(att)
 
             # Invio il messaggio
-            smtp = smtplib.SMTP()
-            smtp.connect()
+            smtp = smtplib.SMTP(s.smtphost)
+            if s.smtpuser or s.smtppass:
+                smtp.login(s.smtpuser, s.smtppass)
             smtp.sendmail(m_from, s.mailto, msg.as_string())
             smtp.quit()
 
@@ -828,4 +835,3 @@ if options.debug > -1:
     print "Backup completed. Took", took
 
 sys.exit(0)
-
