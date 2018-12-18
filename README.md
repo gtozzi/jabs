@@ -18,14 +18,18 @@ This is a simple and powerful rsync-based backup script.
 
 ###Installation:
 - This script is supposed to run as root
-- Copy jabs.cfg in /etc/jabs/jabs.cfg and customize it
+- Copy jabs.py as /usr/local/bin/jabs.py
+- Copy jabs.cfg as /usr/local/etc/jabs.cfg and customize it
+  (see comments and examples inside jabs.cfg)
+- Optional: once you have defined your sets, do a test run
+  of all sets: /usr/local/bin/jabs.py -c /usr/local/etc/jabs.cfg -f
 
 ###Usage:
 Place a cron entry like this one:
 
     MAILTO="your-email-address"
     
-    */5 * * * *     root    /usr/local/bin/jabs.py -b -q
+    */5 * * * *     root    /usr/local/bin/jabs.py -c /usr/local/etc/jabs.cfg -b -q
 
 The script will end silently when has nothing to do.
 Where there is a "soft" error or when a backup is completed, you'll receive
