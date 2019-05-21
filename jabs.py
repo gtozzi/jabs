@@ -810,7 +810,11 @@ for s in sets:
                     msg.attach(att)
 
             # Invio il messaggio
-            smtp = smtplib.SMTP(s.smtphost)
+            if s.smtphost:
+                smtp = smtplib.SMTP(s.smtphost)
+            else:
+                smtp = smtplib.SMTP()
+            smtp.connect()
             if s.smtpuser or s.smtppass:
                 smtp.login(s.smtpuser, s.smtppass)
             smtp.sendmail(m_from, s.mailto, msg.as_string())
