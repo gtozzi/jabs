@@ -59,7 +59,7 @@ def minPythonVersion(major, minor):
         return True
     return False
 
-import os, sys, socket, subprocess, gzip, tempfile, getpass, shutil
+import os, sys, socket, subprocess, threading, gzip, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
 from optparse import OptionParser
 if minPythonVersion(3, 0):
@@ -271,6 +271,55 @@ class JabsConfig(configparser.ConfigParser):
             a time range form a string in the format hh:mm:ss-hh:mm:ss
         """
         return self.__get(name, section, default, 'timerange', multi)
+
+
+class SubProcessCommThread(threading.Thread):
+    """ Base subprocess communication thread class """
+
+    READSIZE = 512
+
+    def __init__(self, sp, stream):
+        """
+            @param sp: The POpen subproces object
+            @param stream: The sp's stream to read from
+        """
+        assert stream == sp.stderr or stream == sp.stdout
+        super(SubProcessCommThread, self).__init__()
+        self.daemon = True
+        self.sp = sp
+        self._stream = stream
+
+    def run(self):
+        while True:
+            text = file.read(self._stream, self.READSIZE)
+            if text == '':
+                break
+            self._processText(text)
+
+
+class SubProcessCommStdoutThread(SubProcessCommThread):
+    """ Handles stdout communication with the rsync/tar subprocess """
+
+    def __init__(self, sp, logh):
+        """
+            @param logh: The logfile handle where to send stdout
+        """
+        super(SubProcessCommStdoutThread, self).__init__(sp, sp.stdout)
+        self.logh = logh
+
+    def _processText(self, text):
+        self.logh.write(text)
+
+
+class SubProcessCommStderrThread(SubProcessCommThread):
+    """ Handles stderr communication with the rsync/tar subprocess """
+
+    def __init__(self, sp):
+        super(SubProcessCommStderrThread, self).__init__(sp, sp.stderr)
+        self.output = ''
+
+    def _processText(self, text):
+        self.output += text
 
 
 class BackupSet:
@@ -709,20 +758,25 @@ for s in sets:
             else:
                 TARLOGFILE = open(tarlogfile, 'wb')
             try:
-                p = subprocess.Popen(cmd,stdout=TARLOGFILE,stderr=subprocess.PIPE)
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
             except OSError as e:
                 print("ERROR: Unable to locate file", e.filename)
                 print("Path: ", os.environ['PATH'])
                 sys.exit(1)
-            stdout, stderr = p.communicate()
+            spoct = SubProcessCommStdoutThread(p, TARLOGFILE)
+            spect = SubProcessCommStderrThread(p)
+            spoct.start()
+            spect.start()
             ret = p.poll()
+            spoct.join()
+            spect.join()
             TARLOGFILE.close()
-            if ret != 0 or len(stderr) > 0:
+            if ret != 0 or len(spect.output) > 0:
                 setsuccess = False
             sl.add("Done. Exit status:", ret)
-            if len(stderr):
+            if len(spect.output):
                 sl.add("ERROR: stderr was not empty:", -1)
-                sl.add(stderr, -1)
+                sl.add(spect.output, -1)
 
         if s.sleep > 0:
             if options.safe:
