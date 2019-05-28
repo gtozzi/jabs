@@ -46,7 +46,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
-import os, sys, socket, subprocess, tempfile, getpass, shutil
+import os, sys, socket, subprocess, gzip, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
 from optparse import OptionParser
 import ConfigParser
@@ -56,6 +56,7 @@ from datetime import datetime, date, timedelta, time
 import re
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 
 # Default configuration
@@ -310,6 +311,7 @@ class BackupSet:
         self.smtphost = config.getstr('SMTPHOST', self.name, None)
         self.smtpuser = config.getstr('SMTPUSER', self.name, None)
         self.smtppass = config.getstr('SMTPPASS', self.name, None)
+        self.compresslog = config.getstr('COMPRESSLOG', self.name, True)
 
         self.remsrc = risremote.match(self.src)
         self.remdst = risremote.match(self.dst)
@@ -664,6 +666,8 @@ for s in sets:
         tarlogfile = None
         if s.mailto:
             tarlogfile = tmpdir + '/' + re.sub(r'(\/|\.)', '_', s.name + '-' + d) + '.log'
+            if s.compresslog:
+                tarlogfile += '.gz'
         if not options.safe:
             tarlogs.append(tarlogfile)
 
@@ -696,7 +700,10 @@ for s in sets:
 
         if not options.safe:
             sys.stdout.flush()
-            TARLOGFILE = open(tarlogfile, 'wb')
+            if s.compresslog:
+                TARLOGFILE = gzip.open(tarlogfile, 'wb')
+            else:
+                TARLOGFILE = open(tarlogfile, 'wb')
             try:
                 p = subprocess.Popen(cmd,stdout=TARLOGFILE,stderr=subprocess.PIPE)
             except OSError as e:
@@ -811,7 +818,10 @@ for s in sets:
             for tl in tarlogs:
                 if tl:
                     TL = open(tl, 'rb')
-                    att = MIMEText(TL.read(),'plain','utf-8')
+                    if s.compresslog:
+                        att = MIMEApplication(TL.read(),'gzip')
+                    else:
+                        att = MIMEText(TL.read(),'plain','utf-8')
                     TL.close()
                     att.add_header(
                         'Content-Disposition',
