@@ -80,6 +80,18 @@ def wrapper(func, args):
     return func(*args)
 
 
+def minPythonVersion(major, minor):
+    """
+        Returns true if current python version is equal or more recent than
+        given one
+    """
+    if sys.version_info[0] > major:
+        return True
+    if sys.version_info[0] == major and sys.version_info[1] >= minor:
+        return True
+    return False
+
+
 class MyLogger:
     """ Custom logger class
 
@@ -775,7 +787,7 @@ for s in sets:
             else:
                 sl.add("Sending detailed logs to", s.mailto, "using local smtp")
 
-            # Creo il messaggio principale
+            # Create main message
             msg = MIMEMultipart()
             if setsuccess:
                 i = "OK"
@@ -790,12 +802,12 @@ for s in sets:
             msg['To'] = ', '.join(s.mailto)
             msg.preamble = 'This is a milti-part message in MIME format.'
 
-            # Aggiungo il testo base
+            # Add base text
             txt = sl.getstr() + "\n\nDetailed logs are attached.\n"
             txt = MIMEText(txt)
             msg.attach(txt)
 
-            # Aggiungo gli allegati
+            # Add attachments
             for tl in tarlogs:
                 if tl:
                     TL = open(tl, 'rb')
@@ -808,18 +820,22 @@ for s in sets:
                     )
                     msg.attach(att)
 
-            # Invio il messaggio
-            if s.smtphost:
-                smtp = smtplib.SMTP(s.smtphost)
+            # Send the message
+            if minPythonVersion(2, 6):
+                smtp = smtplib.SMTP(timeout=300)
             else:
                 smtp = smtplib.SMTP()
-            smtp.connect()
+            #smtp.set_debuglevel(1)
+            if s.smtphost:
+                smtp.connect(s.smtphost)
+            else:
+                smtp.connect()
             if s.smtpuser or s.smtppass:
                 smtp.login(s.smtpuser, s.smtppass)
             smtp.sendmail(m_from, s.mailto, msg.as_string())
             smtp.quit()
 
-    # Cancello eventuali log temporanei
+    # Delete temporary logs, if any
     for tl in tarlogs:
         if tl:
             sl.add("Deleting log file", tl, lvl=1)
