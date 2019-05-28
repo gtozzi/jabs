@@ -59,9 +59,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # Default configuration
-configfile = "/etc/jabs/jabs.cfg"
-version = "jabs v.1.4"
-cachedir = "/var/cache/jabs"
+CONFIGFILE = "/etc/jabs/jabs.cfg"
+VERSION = "jabs v.1.5"
+CACHEDIR = "/var/cache/jabs"
 
 # Useful regexp
 rpat = re.compile('{setname}')
@@ -314,12 +314,11 @@ starttime = datetime.now()
 
 # Parses the command line
 usage = "usage: %prog [options] [sets]"
-version = version
-parser = OptionParser(usage=usage, version=version)
+parser = OptionParser(usage=usage, version=VERSION)
 parser.add_option("-c", "--config", dest="configfile",
-    help="Config file name (default: " + configfile + ")")
+    help="Config file name (default: " + CONFIGFILE + ")")
 parser.add_option("-a", "--cachedir", dest="cachedir",
-    help="Cache directory (default: " + cachedir + ")")
+    help="Cache directory (default: " + CACHEDIR + ")")
 parser.add_option("-d", "--debug", dest="debug", type="int",
     help="Debug level (0 to 1, default: 0)")
 parser.add_option("-q", "--quiet", dest="quiet", action="store_true",
@@ -330,7 +329,7 @@ parser.add_option("-b", "--batch", dest="batch", action="store_true",
     help="batch mode: exit silently if script is already running")
 parser.add_option("-s", "--safe", dest="safe", action="store_true",
     help="safe mode: just print what will do, don't change anything")
-parser.set_defaults(configfile=configfile,cachedir=cachedir,debug=0)
+parser.set_defaults(configfile=CONFIGFILE,cachedir=CACHEDIR,debug=0)
 
 (options, args) = parser.parse_args()
 
@@ -505,7 +504,7 @@ if len(nicelist) > 0:
     nicelist = nicelist[:-1]
 
 backupheader = backupheader_tpl.substitute(
-    version = version,
+    version = VERSION,
     hostname = hostname,
     starttime = starttime.ctime(),
     backuplist = nicelist,
@@ -523,7 +522,7 @@ for s in sets:
     sl = MyLogger()
     sl.setdebuglvl(options.debug)
     sl.add(backupheader_tpl.substitute(
-        version = version,
+        version = VERSION,
         hostname = hostname,
         starttime = starttime.ctime(),
         backuplist = s.name,
