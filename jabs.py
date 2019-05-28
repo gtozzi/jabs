@@ -767,7 +767,7 @@ for s in sets:
             spect = SubProcessCommStderrThread(p)
             spoct.start()
             spect.start()
-            ret = p.poll()
+            ret = p.wait()
             spoct.join()
             spect.join()
             TARLOGFILE.close()
