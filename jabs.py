@@ -77,7 +77,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 CONFIGFILE = "/etc/jabs/jabs.cfg"
-VERSION = "jabs v.1.5"
+VERSION = "jabs v.1.5.1"
 CACHEDIR = "/var/cache/jabs"
 
 # Useful regexp
@@ -752,6 +752,7 @@ for s in sets:
         sl.add("Will write tar STDOUT to", tarlogfile, lvl=1)
 
         if not options.safe:
+            # Execute the backup
             sys.stdout.flush()
             if s.compresslog:
                 TARLOGFILE = gzip.open(tarlogfile, 'wb')
@@ -771,11 +772,23 @@ for s in sets:
             spoct.join()
             spect.join()
             TARLOGFILE.close()
-            if ret != 0 or len(spect.output) > 0:
+            if ret != 0:
                 setsuccess = False
             sl.add("Done. Exit status:", ret)
+
+            # Analyze STDERR
             if len(spect.output):
-                sl.add("ERROR: stderr was not empty:", -1)
+                badoutput = False
+                for line in spect.output.splitlines():
+                    if '(will try again)' in line:
+                        continue
+                    badoutput = True
+                    break
+                if badoutput:
+                    setsuccess = False
+                    sl.add("ERROR: stderr was not empty:", -1)
+                else:
+                    sl.add("WARNING: stderr was not empty (but no errors detected):", -1)
                 sl.add(spect.output, -1)
 
         if s.sleep > 0:
