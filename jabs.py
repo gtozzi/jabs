@@ -276,8 +276,6 @@ class JabsConfig(configparser.ConfigParser):
 class SubProcessCommThread(threading.Thread):
     """ Base subprocess communication thread class """
 
-    READSIZE = 512
-
     def __init__(self, sp, stream):
         """
             @param sp: The POpen subproces object
@@ -291,7 +289,7 @@ class SubProcessCommThread(threading.Thread):
 
     def run(self):
         while True:
-            text = file.read(self._stream, self.READSIZE)
+            text = file.readline(self._stream)
             if text == '':
                 break
             self._processText(text)
@@ -309,6 +307,7 @@ class SubProcessCommStdoutThread(SubProcessCommThread):
 
     def _processText(self, text):
         self.logh.write(text)
+        self.logh.flush()
 
 
 class SubProcessCommStderrThread(SubProcessCommThread):
