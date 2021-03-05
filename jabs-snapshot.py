@@ -58,19 +58,22 @@ class BackupFolder:
 class Snapshotter:
 	''' Monitors a path for new backups and snapshot them '''
 
-	def __init__(self, id, root, cur, hanoiDay, sets):
+	def __init__(self, id, root, cur, hanoiDay, sets, symlinkLast, symlinkLastName):
 		''' Inits the thread
 		@param id string: This threads's unique ID
 		@param root string: The root backup path
 		@param cur string: Name of the current (last) backup fodler
 		@param hanoiDay date: First day for hanoi-based rotation calculations
 		@param sets int: Number of hanoi sets to use
+		@param symlinkLast boolean: Wether to create a symlink to most recent snapshot
 		'''
 		self.id = id
 		self.root = os.path.abspath(root)
 		self.curName = cur
 		self.hanoiDay = hanoiDay
 		self.sets = sets
+		self.symlinkLast = symlinkLast
+		self.symlinkLastName = symlinkLastName
 		self._log = logging.getLogger('snap-{}'.format(id))
 
 		self._log.debug('Initing checker for root "{}" cur "{}"'.format(self.root, self.curName))
@@ -128,6 +131,14 @@ class Snapshotter:
 		# Create new snapshot
 		cmd = ('btrfs', 'subvolume', 'snapshot', '-r', curFolder.path, snapPath)
 		self.btrfsSub(cmd)
+
+		symlPath = os.path.join(self.root, self.symlinkLastName)
+		# Delete symlink if exists
+		os.remove(symlPath)
+
+		# Create symlink
+		os.symlink(snapPath, symlPath)
+		self._log.info('Updated symlink to last snapshot "{}"'.format(symlPath))
 
 	def calcHanoi(self, sets, firstDay, today):
 		''' Calculate hanoi day and suffix to use
@@ -196,6 +207,8 @@ class Main:
 			cur = self.config.get(section, 'curfolder')
 			rawhd = self.config.get(section, 'hanoiDay')
 			sets = self.config.getint(section, 'hanoi')
+			symlinkLast = self.config.getboolean(section, 'symlast')
+			symlinkLastName = self.config.get(section, 'symlastname')
 			m = dateRe.match(rawhd)
 			if not m:
 				raise ValueError('Invalid date "{}"'.format(rawhd))
@@ -203,7 +216,7 @@ class Main:
 			if sets < 1:
 				raise ValueError('Invalid hanoi sets number')
 
-			Snapshotter(section, root, cur, hanoiDay, sets).run()
+			Snapshotter(section, root, cur, hanoiDay, sets, symlinkLast, symlinkLastName).run()
 
 
 if __name__ == '__main__':
