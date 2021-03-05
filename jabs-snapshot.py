@@ -94,7 +94,7 @@ class Snapshotter:
 		backupFolders = {}
 		curFolder = None
 		for f in os.listdir(self.root):
-			if not os.path.isdir(os.path.join(self.root, f)):
+			if not os.path.isdir(os.path.join(self.root, f)) or os.path.islink(os.path.join(self.root, f)):
 				continue
 
 			bf = BackupFolder(self.root, f)
@@ -134,11 +134,16 @@ class Snapshotter:
 
 		symlPath = os.path.join(self.root, self.symlinkLastName)
 		# Delete symlink if exists
-		os.remove(symlPath)
-
-		# Create symlink
-		os.symlink(snapPath, symlPath)
-		self._log.info('Updated symlink to last snapshot "{}"'.format(symlPath))
+		if os.path.isfile(symlPath) or (os.path.isdir(symlPath) and not os.path.islink(symlPath)):
+			# Dangerous case: the configured symlink path ponts to an actual directory!
+			self._log.error('Misconfigured: SYMLAST is enabled and SYMLASTNAME points to an actual file or directory. Unable to create symlink.')
+		else:
+			if os.path.islink(symlPath):
+				# Delete symlink to previous snapshot
+				os.remove(symlPath)
+			# Create symlink to last snaposhot
+			os.symlink(snapPath, symlPath)
+			self._log.info('Updated symlink to last snapshot "{}"'.format(symlPath))
 
 	def calcHanoi(self, sets, firstDay, today):
 		''' Calculate hanoi day and suffix to use
