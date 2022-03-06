@@ -77,7 +77,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 CONFIGFILE = "/etc/jabs/jabs.cfg"
-VERSION = "jabs v.1.5.1"
+VERSION = "jabs v.1.6"
 CACHEDIR = "/var/cache/jabs"
 
 # Useful regexp

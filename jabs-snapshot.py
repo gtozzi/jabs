@@ -29,6 +29,15 @@ import traceback
 import configparser
 import subprocess
 
+# Should stay in sunc with jabs
+VERSION = "jabs-snapshot v.1.6"
+
+# Default values for configuration
+CONFIG_DEFAULTS = {
+	'linklast': True,
+	'linklastname': 'lastsnap',
+}
+
 
 class BackupFolder:
 	TIMESTAMP_FILE = 'backup-timestamp'
@@ -58,22 +67,24 @@ class BackupFolder:
 class Snapshotter:
 	''' Monitors a path for new backups and snapshot them '''
 
-	def __init__(self, id, root, cur, hanoiDay, sets, symlinkLast, symlinkLastName):
+	def __init__(self, id, root, cur, hanoiDay, sets,
+			lnLast=CONFIG_DEFAULTS['linklast'], lnLastName=CONFIG_DEFAULTS['linklastname']):
 		''' Inits the thread
 		@param id string: This threads's unique ID
 		@param root string: The root backup path
 		@param cur string: Name of the current (last) backup fodler
 		@param hanoiDay date: First day for hanoi-based rotation calculations
 		@param sets int: Number of hanoi sets to use
-		@param symlinkLast boolean: Wether to create a symlink to most recent snapshot
+		@param lnLast boolean: Wether to create a symlink to most recent snapshot
+		@param lnLastName string: Name for the created symlink
 		'''
 		self.id = id
 		self.root = os.path.abspath(root)
 		self.curName = cur
 		self.hanoiDay = hanoiDay
 		self.sets = sets
-		self.symlinkLast = symlinkLast
-		self.symlinkLastName = symlinkLastName
+		self.lnLast = lnLast
+		self.lnLastName = lnLastName
 		self._log = logging.getLogger('snap-{}'.format(id))
 
 		self._log.debug('Initing checker for root "{}" cur "{}"'.format(self.root, self.curName))
@@ -94,7 +105,9 @@ class Snapshotter:
 		backupFolders = {}
 		curFolder = None
 		for f in os.listdir(self.root):
-			if not os.path.isdir(os.path.join(self.root, f)) or os.path.islink(os.path.join(self.root, f)):
+			if not os.path.isdir(os.path.join(self.root, f)):
+				continue
+			if os.path.islink(os.path.join(self.root, f)):
 				continue
 
 			bf = BackupFolder(self.root, f)
@@ -132,18 +145,27 @@ class Snapshotter:
 		cmd = ('btrfs', 'subvolume', 'snapshot', '-r', curFolder.path, snapPath)
 		self.btrfsSub(cmd)
 
-		symlPath = os.path.join(self.root, self.symlinkLastName)
+		if self.lnLast:
+			self.symlinkSnapshot(snapPath)
+
+	def symlinkSnapshot(self, snapPath):
+		''' Create a symlink for the last snapshot '''
+
+		lnPath = os.path.join(self.root, self.lnLastName)
+
 		# Delete symlink if exists
-		if os.path.isfile(symlPath) or (os.path.isdir(symlPath) and not os.path.islink(symlPath)):
-			# Dangerous case: the configured symlink path ponts to an actual directory!
-			self._log.error('Misconfigured: SYMLAST is enabled and SYMLASTNAME points to an actual file or directory. Unable to create symlink.')
-		else:
-			if os.path.islink(symlPath):
-				# Delete symlink to previous snapshot
-				os.remove(symlPath)
-			# Create symlink to last snaposhot
-			os.symlink(snapPath, symlPath)
-			self._log.info('Updated symlink to last snapshot "{}"'.format(symlPath))
+		if os.path.exists(lnPath):
+			if not os.path.islink(lnPath):
+				# This is not a real symlink! Not messing with it
+				self._log.error('Not overwriting "%s" because it is not a symlink. Unable to create symlink.', lnPath)
+				return False
+
+			os.remove(lnPath)
+
+		# Create symlink to last snaposhot
+		os.symlink(snapPath, lnPath)
+		self._log.info('Updated symlink "%s" to last snapshot', lnPath)
+		return True
 
 	def calcHanoi(self, sets, firstDay, today):
 		''' Calculate hanoi day and suffix to use
@@ -194,7 +216,7 @@ class Main:
 		if not os.path.exists(configPath) or not os.path.isfile(configPath):
 			raise ValueError('configPath must be a file')
 
-		self.config = configparser.ConfigParser()
+		self.config = configparser.ConfigParser(defaults=CONFIG_DEFAULTS)
 		self.config.read(configPath)
 
 	def run(self):
@@ -212,8 +234,8 @@ class Main:
 			cur = self.config.get(section, 'curfolder')
 			rawhd = self.config.get(section, 'hanoiDay')
 			sets = self.config.getint(section, 'hanoi')
-			symlinkLast = self.config.getboolean(section, 'symlast')
-			symlinkLastName = self.config.get(section, 'symlastname')
+			linkLast = self.config.getboolean(section, 'linklast')
+			linkLastName = self.config.get(section, 'linklastname')
 			m = dateRe.match(rawhd)
 			if not m:
 				raise ValueError('Invalid date "{}"'.format(rawhd))
@@ -221,7 +243,7 @@ class Main:
 			if sets < 1:
 				raise ValueError('Invalid hanoi sets number')
 
-			Snapshotter(section, root, cur, hanoiDay, sets, symlinkLast, symlinkLastName).run()
+			Snapshotter(section, root, cur, hanoiDay, sets, linkLast, linkLastName).run()
 
 
 if __name__ == '__main__':
@@ -229,6 +251,7 @@ if __name__ == '__main__':
 
 	parser = argparse.ArgumentParser()
 	parser.add_argument('configFile', help="configuration file path")
+	parser.add_argument('--version', action='version', version=VERSION)
 	parser.add_argument('-v', '--verbose', action='store_true', help="more verbose output")
 	parser.add_argument('-q', '--quiet', action='store_true', help="suppress non-essential output")
 	args = parser.parse_args()
