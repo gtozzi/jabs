@@ -1,0 +1,6 @@
+# JABS - Just Another Backup Script
+MAILTO="root"
+
+# Uncomment lines to start running the backup
+#*/5 * * * *     root    /usr/bin/jabs.py -b -q
+#*/5 * * * *     root    /usr/bin/jabs-snapshot.py /etc/jabs/jabs-snapshot.cfg -q
