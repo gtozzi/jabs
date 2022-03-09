@@ -64,6 +64,7 @@ class Packager:
 
 	VER_PARSER = re.compile(r"^jabs(?:-snapshot)\s+v.([0-9.]+)$")
 	TEMP_PREFIX = 'jabs_build_'
+	DEB_VER = 2
 
 	def __init__(self):
 		self.path = os.path.abspath(os.path.dirname(__file__))
@@ -87,33 +88,39 @@ class Packager:
 
 	def __build(self, rootDir, tpl):
 		# Create the base dir
-		baseDir = '{}_{}_{}'.format(PACKAGE_NAME, tpl['Version'], tpl['Architecture'])
+		baseDir = '{}_{}_{}_{}'.format(PACKAGE_NAME, self.version, self.DEB_VER, tpl['Architecture'])
 		basePath = os.path.join(rootDir, baseDir)
 		os.mkdir(basePath)
+		os.mkdir(os.path.join(basePath, 'DEBIAN'))
 
-		# Copy the files (read sizes)
+		# Copy the files (read sizes and create conffile meanwhile)
 		roughSize = 0
 		tocopy = {
 			('usr', 'bin'): ( ('jabs.py', 0o755), ('jabs-snapshot.py', 0o755) ),
 			('etc', 'jabs'): ( ('jabs.cfg', 0o600), ('jabs-snapshot.cfg', 0o600) ),
 			('etc', 'cron.d'): ( ('example.crontab', 0o644, 'jabs'), ),
 		}
-		for path, files in tocopy.items():
-			fullPath = os.path.join(basePath, *path)
-			os.makedirs(fullPath)
-			for finfo in files:
-				src = os.path.join(self.path, finfo[0])
-				dst = os.path.join(fullPath, finfo[2] if len(finfo) > 2 else finfo[0])
-				self._log.debug('Copying "%s" as "%s"', src, dst)
-				roughSize += os.path.getsize(src)
-				shutil.copyfile(src, dst)
-				os.chmod(dst, finfo[1])
+		with open(os.path.join(basePath, 'DEBIAN', 'conffiles'), 'wt') as cf:
+			for path, files in tocopy.items():
+				fullPath = os.path.join(basePath, *path)
+				os.makedirs(fullPath)
+				for finfo in files:
+					src = os.path.join(self.path, finfo[0])
+					dstname = finfo[2] if len(finfo) > 2 else finfo[0]
+					dst = os.path.join(fullPath, dstname)
+					self._log.debug('Copying "%s" as "%s"', src, dst)
+					roughSize += os.path.getsize(src)
+					shutil.copyfile(src, dst)
+					os.chmod(dst, finfo[1])
+
+					# Append to conffiles if needed
+					if path[0] == 'etc':
+						cf.write(os.path.join(os.sep, *path, dstname) + "\n")
 
 		# Update the installed size
 		tpl['Installed-Size'] = math.ceil(roughSize / 1024)
 
 		# Create the control file
-		os.mkdir(os.path.join(basePath, 'DEBIAN'))
 		with open(os.path.join(basePath, 'DEBIAN', 'control'), 'wt') as f:
 			for key, value in tpl.items():
 				f.write("{}: {}\n".format(key, value))
@@ -144,7 +151,8 @@ class Packager:
 		m = self.VER_PARSER.match(jsn.VERSION)
 		if not m:
 			raise RuntimeError('jabs-snapshot version not parsed: {}'.format(jsn.VERSION))
-		tpl['Version'] = m.group(1)
+		self.version = m.group(1)
+		tpl['Version'] = "{}+{}".format(self.version, self.DEB_VER)
 
 		# Read description
 		#with open('jabs.py', 'rt') as f:
