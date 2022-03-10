@@ -30,7 +30,7 @@ import configparser
 import subprocess
 
 # Should stay in sunc with jabs
-VERSION = "jabs-snapshot v.1.6"
+VERSION = "jabs-snapshot v.1.6.1"
 
 # Default values for configuration
 CONFIG_DEFAULTS = {
@@ -98,8 +98,11 @@ class Snapshotter:
 		if not os.path.isdir(self.root):
 			raise ValueError('Invalid root dir {}'.format(self.root))
 
-	def run(self):
-		''' Scans the folders and takes a snapshot if needed '''
+	def run(self, forceLink=False):
+		''' Scans the folders and takes a snapshot if needed
+
+		@param forceLink bool When true, forces recreation of last symlink
+		'''
 
 		# Scans the folders
 		backupFolders = {}
@@ -124,7 +127,10 @@ class Snapshotter:
 		# Look for a snapshot of cur
 		for folder in backupFolders.values():
 			if folder.timestamp == curFolder.timestamp:
-				self._log.info('Cur snapshot is folder "%s", nothing to do', folder)
+				act = 'recreating symlink' if forceLink else 'nothing to do'
+				self._log.info('Cur snapshot is folder "%s", %s', folder, act)
+				if forceLink:
+					self.symlinkSnapshot(folder.path)
 				return
 
 		hday, hsuf = self.calcHanoi(self.sets, self.hanoiDay, curFolder.timestamp.date())
@@ -219,7 +225,7 @@ class Main:
 		self.config = configparser.ConfigParser(defaults=CONFIG_DEFAULTS)
 		self.config.read(configPath)
 
-	def run(self):
+	def run(self, forceLink=False):
 		''' Runs the snapshotter '''
 		dateRe = re.compile(r'^([0-9]{4})-([0-9]{2})-([0-9]{2})$')
 
@@ -243,7 +249,7 @@ class Main:
 			if sets < 1:
 				raise ValueError('Invalid hanoi sets number')
 
-			Snapshotter(section, root, cur, hanoiDay, sets, linkLast, linkLastName).run()
+			Snapshotter(section, root, cur, hanoiDay, sets, linkLast, linkLastName).run(forceLink)
 
 
 if __name__ == '__main__':
@@ -254,6 +260,7 @@ if __name__ == '__main__':
 	parser.add_argument('--version', action='version', version=VERSION)
 	parser.add_argument('-v', '--verbose', action='store_true', help="more verbose output")
 	parser.add_argument('-q', '--quiet', action='store_true', help="suppress non-essential output")
+	parser.add_argument('-l', '--linklast', action='store_true', help="(re)create symlink to last snapshot")
 	args = parser.parse_args()
 
 	if args.verbose:
@@ -266,7 +273,7 @@ if __name__ == '__main__':
 	logging.basicConfig(level=level, format=format)
 
 	try:
-		main = Main(args.configFile).run()
+		main = Main(args.configFile).run(forceLink=args.linklast)
 	except Exception as e:
 		logging.critical(traceback.format_exc())
 		print('ERROR: {}'.format(e))

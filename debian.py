@@ -64,7 +64,7 @@ class Packager:
 
 	VER_PARSER = re.compile(r"^jabs(?:-snapshot)\s+v.([0-9.]+)$")
 	TEMP_PREFIX = 'jabs_build_'
-	DEB_VER = 2
+	DEB_VER = 1
 
 	def __init__(self):
 		self.path = os.path.abspath(os.path.dirname(__file__))
