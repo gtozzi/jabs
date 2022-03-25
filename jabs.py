@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+#!/usr/bin/env python3
 # kate: space-indent off; tab-indent on;
 
 """ @package docstring
@@ -376,23 +376,23 @@ class Jabs:
 		'''
 
 		parser = argparse.ArgumentParser(description=VERSION)
-		parser.add_option("-c", "--config", dest="configfile", default=CONFIGFILE,
+		parser.add_argument("-c", "--config", dest="configfile", default=CONFIGFILE,
 			help="Config file name")
-		parser.add_option("-a", "--cachedir", default=CACHEDIR,
+		parser.add_argument("-a", "--cachedir", default=CACHEDIR,
 			help="Cache directory")
-		parser.add_option("--pidfile",
+		parser.add_argument("--pidfile",
 			help="PID file path, overrides config if given")
-		parser.add_option("-v", "--verbose", action="store_true",
+		parser.add_argument("-v", "--verbose", action="store_true",
 			help="Increase output verbosity (overrides -d)")
-		parser.add_option("-q", "--quiet", action="store_true",
+		parser.add_argument("-q", "--quiet", action="store_true",
 			help="suppress all non-error output")
-		parser.add_option("-f", "--force", action="store_true",
+		parser.add_argument("-f", "--force", action="store_true",
 			help="ignore time constraints: will always run sets at any time")
-		parser.add_option("-b", "--batch", action="store_true",
+		parser.add_argument("-b", "--batch", action="store_true",
 			help="batch mode: exit silently if script is already running")
-		parser.add_option("-s", "--safe", action="store_true",
+		parser.add_argument("-s", "--safe", action="store_true",
 			help="safe mode: just print what will do, don't change anything")
-		parser.add_option("sets", nargs="*",
+		parser.add_argument("sets", nargs="*",
 			help="list of sets to run; if omited, will run all")
 
 		args = parser.parse_args()
