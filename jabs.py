@@ -60,11 +60,8 @@ def minPythonVersion(major, minor):
 
 import os, sys, socket, subprocess, threading, gzip, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
-from optparse import OptionParser
-if minPythonVersion(3, 0):
-	import configparser
-else:
-	import ConfigParser as configparser
+import argparse
+import configparser
 from string import Template
 from time import sleep, mktime
 from datetime import datetime, date, timedelta, time
@@ -168,7 +165,7 @@ class JabsConfig(configparser.ConfigParser):
 			return wrapper(date, map(int, configparser.ConfigParser.get(self, section, name).strip().split('-',3)))
 		elif vtype == 'interval':
 			string = configparser.ConfigParser.get(self, section, name).strip()
-			d, h, m, s = (0 for x in xrange(4))
+			d, h, m, s = (0 for x in range(4))
 			if len(string):
 				for i in string.split():
 					if i[-1] == 's':
@@ -288,8 +285,8 @@ class SubProcessCommThread(threading.Thread):
 
 	def run(self):
 		while True:
-			text = file.readline(self._stream)
-			if text == '':
+			text = self._stream.readline()
+			if text == b'':
 				break
 			self._processText(text)
 
@@ -314,7 +311,7 @@ class SubProcessCommStderrThread(SubProcessCommThread):
 
 	def __init__(self, sp):
 		super(SubProcessCommStderrThread, self).__init__(sp, sp.stderr)
-		self.output = ''
+		self.output = b''
 
 	def _processText(self, text):
 		self.output += text
@@ -376,65 +373,82 @@ class Jabs:
 	''' Main JABS class '''
 
 	def __init__(self):
-		pass
+		#TODO: Temporary debug level setting, will use logging instead
+		self.debug = 0
 
-	def run(self):
+	def runFromCommandLine(self) -> int:
+		''' Parses the command line and runs JABS
+		@return int exit status, 0 on success
+		'''
+
+		parser = argparse.ArgumentParser(description=VERSION)
+		parser.add_option("-c", "--config", dest="configfile", default=CONFIGFILE,
+			help="Config file name")
+		parser.add_option("-a", "--cachedir", default=CACHEDIR,
+			help="Cache directory")
+		parser.add_option("--pidfile",
+			help="PID file path, overrides config if given")
+		parser.add_option("-v", "--verbose", action="store_true",
+			help="Increase output verbosity (overrides -d)")
+		parser.add_option("-q", "--quiet", action="store_true",
+			help="suppress all non-error output")
+		parser.add_option("-f", "--force", action="store_true",
+			help="ignore time constraints: will always run sets at any time")
+		parser.add_option("-b", "--batch", action="store_true",
+			help="batch mode: exit silently if script is already running")
+		parser.add_option("-s", "--safe", action="store_true",
+			help="safe mode: just print what will do, don't change anything")
+		parser.add_option("sets", nargs="*",
+			help="list of sets to run; if omited, will run all")
+
+		args = parser.parse_args()
+
+		# Set debug level according to -v/-d switches
+		if self.verbose:
+			self.debug = 1
+		elif self.quiet:
+			self.debug = -1
+
+		return self.run(args.configfile, args.cachedir, args.sets, args.force, args.batch, args.safe)
+
+
+	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str=None, onlySets:list=None, force:bool=False, batch:bool=False, safe:bool=False) -> int:
+		''' Runs JABS
+		@param cfgPath str: Path for the config file
+		@param cacheDir str: Path for the cache directory
+		@param pidFilePath str: Path of PID file (overrides config if given)
+		@param onlySets list: List of sets to run
+		@param force bool: When True will ignore time constraints and always run sets at any time
+		@param batch bool: When true enables batch mode: exit silently if script is already running
+		@param safe bool: When True enables safe mode: just print what will do, don't change anything
+		@return int exit status, 0 on success
+		'''
 		# Init some useful variables
 		hostname = socket.getfqdn()
 		username = getpass.getuser()
 		starttime = datetime.now()
 
-		# Parses the command line
-		usage = "usage: %prog [options] [sets]"
-		parser = OptionParser(usage=usage, version=VERSION)
-		parser.add_option("-c", "--config", dest="configfile",
-			help="Config file name (default: " + CONFIGFILE + ")")
-		parser.add_option("-a", "--cachedir", dest="cachedir",
-			help="Cache directory (default: " + CACHEDIR + ")")
-		parser.add_option("-d", "--debug", dest="debug", type="int",
-			help="Debug level (0 to 1, default: 0)")
-		parser.add_option("-q", "--quiet", dest="quiet", action="store_true",
-			help="suppress all non-error output (overrides -d)")
-		parser.add_option("-f", "--force", dest="force", action="store_true",
-			help="ignore time constraints: will always run sets at any time")
-		parser.add_option("-b", "--batch", dest="batch", action="store_true",
-			help="batch mode: exit silently if script is already running")
-		parser.add_option("-s", "--safe", dest="safe", action="store_true",
-			help="safe mode: just print what will do, don't change anything")
-		parser.set_defaults(configfile=CONFIGFILE,cachedir=CACHEDIR,debug=0)
-
-		(options, args) = parser.parse_args()
-
-		# Set debug level to -1 if --quiet was specified
-		if options.quiet:
-			options.debug = -1
-
-		# Validate the command line
-		#if not options.setname:
-		#	parser.print_help()
-
 		# Reads the config file
 		config = JabsConfig()
 		try:
-			config.readfp(open(options.configfile))
+			with open(cfgPath, 'rt') as f:
+				config.read_file(f)
 		except IOError:
-			print("ERROR: Couldn't open config file", options.configfile)
-			parser.print_help()
-			sys.exit(1)
+			print("ERROR: Couldn't open config file", cfgPath)
+			return 1
 
 		# Reads settings from the config file
 		sets = config.sections()
 		if sets.count("Global") < 1:
 			print("ERROR: Global section on config file not found")
-			sys.exit(1)
+			return 1
 		sets.remove("Global")
 
 		# If specified at command line, remove unwanted sets
-		if args:
-			lower_args = map(lambda i: i.lower(), args)
-			sets[:] = [s for s in sets if s.lower() in lower_args]
+		if onlySets:
+			sets = [s for s in sets if s.lower() in map(lambda i: i.lower(), onlySets)]
 
-		if options.debug > 0:
+		if self.debug > 0:
 			print("Will run these backup sets:", sets)
 
 		#Init backup sets
@@ -448,7 +462,7 @@ class Jabs:
 		sets = sorted(sets, key=lambda s: s.pri)
 
 		#Read the PIDFILE
-		pidfile = config.getstr('PIDFILE')
+		pidfile = config.getstr('PIDFILE') if pidFilePath is None else pidFilePath
 
 		# Check if another insnance of the script is already running
 		if os.path.isfile(pidfile):
@@ -460,18 +474,18 @@ class Jabs:
 				PIDFILE.close()
 			else:
 				# The other process is till running
-				if options.batch:
-					sys.exit(0)
+				if batch:
+					return 0
 				else:
 					print("Error: this script is already running!")
-					sys.exit(12)
+					return 12
 
 		# Save my PID on pidfile
 		try:
 			PIDFILE = open(pidfile, "w")
 		except:
 			print("Error: couldn't open PID file", pidfile)
-			sys.exit(15)
+			return 15
 		PIDFILE.write(str(os.getpid()))
 		PIDFILE.flush()
 
@@ -484,11 +498,11 @@ class Jabs:
 		del newsets
 
 		# Check for sets to run based on current time
-		if not options.force:
+		if not force:
 			newsets = []
 			for s in sets:
 				if s.runtime[0] > starttime.time() or s.runtime[1] < starttime.time():
-					if options.debug > 0:
+					if self.debug > 0:
 						print("Skipping set", s.name, "because out of runtime (", s.runtime[0].isoformat(), "-", s.runtime[1].isoformat(), ")")
 				else:
 					newsets.append(s)
@@ -496,15 +510,15 @@ class Jabs:
 			del newsets
 
 		# Check for sets to run based on interval
-		if not options.force:
+		if not force:
 			newsets = []
 			for s in sets:
 				if s.interval and s.interval > timedelta(seconds=0):
 					# Check if its time to run this set
-					if options.debug > 0:
+					if self.debug > 0:
 						print("Will run", s.name, "every", s.interval)
-					cachefile = options.cachedir + "/" + s.name
-					if not os.path.exists(options.cachedir):
+					cachefile = cacheDir + "/" + s.name
+					if not os.path.exists(cacheDir):
 						print("WARNING: Cache directory missing, creating it")
 						os.mkdir(os.path.dirname(cachefile))
 					if not os.path.exists(cachefile):
@@ -518,11 +532,11 @@ class Jabs:
 							print("WARNING: Last backup timestamp for", s.name, "corrupted. Assuming 01-01-1970")
 							lastdone = datetime.fromtimestamp(0)
 						CACHEFILE.close()
-					if options.debug > 0:
+					if self.debug > 0:
 						print("Last", s.name, "run:", lastdone)
 
 					if lastdone + s.interval > starttime:
-						if options.debug > 0:
+						if self.debug > 0:
 							print("Skipping set", s.name, "because interval not reached (", str(lastdone+s.interval-starttime), "still remains )")
 					else:
 						newsets.append(s)
@@ -535,16 +549,16 @@ class Jabs:
 		for s in sets:
 			if s.ping and s.remsrc:
 				host = s.remsrc.group(1).split('@')[1]
-				if options.debug > 0:
+				if self.debug > 0:
 					print("Pinging host", host)
 				FNULL = open('/dev/null', 'w')
 				hup = subprocess.call(['ping', '-c 3','-n','-w 60', host], stdout=FNULL, stderr=FNULL)
 				FNULL.close()
 				if hup == 0:
-					if options.debug > -1:
+					if self.debug > -1:
 						print(host, "is UP.")
 					newsets.append(s)
-				elif options.debug > 0:
+				elif self.debug > 0:
 					print("Skipping backup of", host, "because it's down.")
 			else:
 				newsets.append(s)
@@ -554,7 +568,7 @@ class Jabs:
 
 		# Check if some set is still remaining after checks
 		if not len(sets):
-			sys.exit(0)
+			return 0
 
 		# Print the backup header
 		backupheader_tpl = Template("""
@@ -581,7 +595,7 @@ $backuplist
 			starttime = starttime.ctime(),
 			backuplist = nicelist,
 		)
-		if options.debug > -1:
+		if self.debug > -1:
 			print(backupheader)
 
 		# ---------------- DO THE BACKUP ---------------------------
@@ -592,7 +606,7 @@ $backuplist
 
 			# Write some log data in a string, to be eventually mailed later
 			sl = MyLogger()
-			sl.setdebuglvl(options.debug)
+			sl.setdebuglvl(self.debug)
 			sl.add(backupheader_tpl.substitute(
 				version = VERSION,
 				hostname = hostname,
@@ -619,7 +633,7 @@ $backuplist
 			tmpdir = tempfile.mkdtemp()
 			tmpfile = None
 			if s.datefile:
-				if options.safe:
+				if safe:
 					sl.add("Skipping creation of datefile", s.datefile)
 				else:
 					tmpfile = tmpdir + "/" + s.datefile
@@ -726,11 +740,11 @@ $backuplist
 					tarlogfile = tmpdir + '/' + re.sub(r'(\/|\.)', '_', s.name + '-' + d) + '.log'
 					if s.compresslog:
 						tarlogfile += '.gz'
-				if not options.safe:
+				if not safe:
 					tarlogs.append(tarlogfile)
 
 				#Build command line
-				cmd, cmdi, cmdn, cmdr = ([] for x in xrange(4))
+				cmd, cmdi, cmdn, cmdr = ([] for x in range(4))
 				cmdi.extend(["ionice", "-c", str(s.ionice)])
 				cmdn.extend(["nice", "-n", str(s.nice)])
 				cmdr.append("rsync")
@@ -749,14 +763,14 @@ $backuplist
 					cmd.extend(cmdn)
 				cmd.extend(cmdr)
 
-				if options.safe:
+				if safe:
 					nlvl = 0
 				else:
 					nlvl = 1
 				sl.add("Commandline:", cmd, lvl=nlvl)
 				sl.add("Will write tar STDOUT to", tarlogfile, lvl=1)
 
-				if not options.safe:
+				if not safe:
 					# Execute the backup
 					sys.stdout.flush()
 					if s.compresslog:
@@ -768,7 +782,7 @@ $backuplist
 					except OSError as e:
 						print("ERROR: Unable to locate file", e.filename)
 						print("Path: ", os.environ['PATH'])
-						sys.exit(1)
+						return 1
 					spoct = SubProcessCommStdoutThread(p, TARLOGFILE)
 					spect = SubProcessCommStderrThread(p)
 					spoct.start()
@@ -785,7 +799,7 @@ $backuplist
 					if len(spect.output):
 						badoutput = False
 						for line in spect.output.splitlines():
-							if '(will try again)' in line:
+							if b'(will try again)' in line:
 								continue
 							badoutput = True
 							break
@@ -797,7 +811,7 @@ $backuplist
 						sl.add(spect.output, -1)
 
 				if s.sleep > 0:
-					if options.safe:
+					if safe:
 						sl.add("Should sleep", s.sleep, "secs now, skipping.")
 					else:
 						sl.add("Sleeping", s.sleep, "secs.")
@@ -812,17 +826,17 @@ $backuplist
 
 			# Save last backup execution time
 			if s.interval and s.interval > timedelta(seconds=0):
-				if options.safe:
+				if safe:
 					sl.add("Skipping write of last backup timestamp")
 				else:
 					sl.add("Writing last backup timestamp", lvl=1)
 
 					# Create cachedir if missing
-					if not os.path.exists(options.cachedir):
+					if not os.path.exists(cacheDir):
 						# 448 corresponds to octal 0700 and is both python 2 and 3 compatible
-						os.makedirs(options.cachedir, 448)
+						os.makedirs(cacheDir, 448)
 
-					cachefile = options.cachedir + os.sep + s.name
+					cachefile = cacheDir + os.sep + s.name
 					CACHEFILE = open(cachefile,'w')
 					CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
 					CACHEFILE.close()
@@ -830,18 +844,18 @@ $backuplist
 			# Create backup symlink, is using hanoi and not remote
 			if len(hanoisuf)>0 and not s.remdst:
 				if os.path.exists(s.dst) and S_ISLNK(os.lstat(s.dst)[ST_MODE]):
-					if options.safe:
+					if safe:
 						sl.add("Skipping deletion of old symlink", s.dst)
 					else:
 						sl.add("Deleting old symlink", s.dst)
 						os.unlink(s.dst)
 				if not os.path.exists(s.dst):
-					if options.safe:
+					if safe:
 						sl.add("Skipping creation of symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
 					else:
 						sl.add("Creating symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
 						os.symlink(s.dst+s.sep+hanoisuf, s.dst)
-				elif not options.safe:
+				elif not safe:
 					sl.add("WARNING: Can't create symlink", s.dst, "a file with such name exists", lvl=-1)
 
 			stooktime = datetime.now() - sstarttime
@@ -863,7 +877,7 @@ $backuplist
 
 			# Send email
 			if s.mailto:
-				if options.safe:
+				if safe:
 					sl.add("Skipping sending detailed logs to", s.mailto)
 				else:
 					if s.smtphost:
@@ -937,11 +951,11 @@ $backuplist
 				os.rmdir(tmpdir)
 
 		took = datetime.now() - starttime
-		if options.debug > -1:
+		if self.debug > -1:
 			print("Backup completed. Took", took)
 
 		return 0
 
 
 if __name__ == '__main__':
-	sys.exit(Jabs().run())
+	sys.exit(Jabs().runFromCommandLine())

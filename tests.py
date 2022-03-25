@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 
-import unittest
-
-
 """ @package docstring
 JABS - Just Another Backup Script
 
@@ -24,12 +21,34 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
+import os
+import unittest
+
 
 class TestRun(unittest.TestCase):
 
 	def test_import(self):
 		import jabs
+		jsnap = __import__('jabs-snapshot')
 
+	def test_versions(self):
+		import jabs
+		jsnap = __import__('jabs-snapshot')
+
+		self.assertTrue(jabs.VERSION.split(' ')[1] == jsnap.VERSION.split(' ')[1], "{} != {}".format(jabs.VERSION, jsnap.VERSION))
+
+	def test_run_jabs(self):
+		''' Run a test backup '''
+		DEST = '/tmp/jabs-backup'
+
+		if not os.path.exists(DEST):
+			os.mkdir(DEST)
+
+		import jabs
+		j = jabs.Jabs()
+		j.debug = 1
+		res = j.run('jabs.cfg', '/tmp/', pidFilePath='/tmp/jabs.pid', onlySets=['Test'], force=True)
+		self.assertTrue(res == 0, res)
 
 if __name__ == '__main__':
 	unittest.main()
