@@ -398,9 +398,9 @@ class Jabs:
 		args = parser.parse_args()
 
 		# Set debug level according to -v/-d switches
-		if self.verbose:
+		if args.verbose:
 			self.debug = 1
-		elif self.quiet:
+		elif args.quiet:
 			self.debug = -1
 
 		return self.run(args.configfile, args.cachedir, args.sets, args.force, args.batch, args.safe)
