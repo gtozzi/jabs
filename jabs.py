@@ -319,11 +319,13 @@ class BackupSet:
 		"""
 		self.name = name
 
+		self.program = config.getstr('PROGRAM', self.name, 'rsync')
 		self.backuplist = config.getlist('BACKUPLIST', self.name)
 		self.deletelist = config.getlist('DELETELIST', self.name, [])
 		self.ionice = config.getint('IONICE', self.name, 0)
 		self.nice = config.getint('NICE', self.name, 0)
 		self.rsync_opts = config.getlist('RSYNC_OPTS', self.name)
+		self.rclone_opts = config.getlist('RCLONE_OPTS', self.name)
 		self.src = config.getstr('SRC', self.name)
 		self.dst = config.getstr('DST', self.name)
 		self.sleep = config.getint('SLEEP', self.name, 0)
@@ -650,7 +652,10 @@ $backuplist
 				sl.add("Today is hanoi day", today, "- using suffix:", hanoisuf)
 
 			plink = []
-			if s.hardlink:
+			if s.hardlink and not s.program == 'rsync':
+				sl.add("Will NOT use hark linking (not supported in {})".format(s.program), stderr, lvl=-1)
+
+			elif s.hardlink:
 				# Seek for most recent backup set to hard link
 				if s.remdst:
 					#Backing up to a remote path
@@ -739,8 +744,11 @@ $backuplist
 				cmd, cmdi, cmdn, cmdr = ([] for x in range(4))
 				cmdi.extend(["ionice", "-c", str(s.ionice)])
 				cmdn.extend(["nice", "-n", str(s.nice)])
-				cmdr.append("rsync")
-				cmdr.extend(map(lambda x: rpat.sub(s.name.lower(),x), s.rsync_opts))
+				if s.program not in ('rsync', 'rclone'):
+					raise RuntimeError('Unsupported program {}'.format(s.program))
+				opts = s.rsync_opts if s.program == 'rsync' else s.rclone_opts
+				cmdr.append(s.program)
+				cmdr.extend(map(lambda x: rpat.sub(s.name.lower(),x), opts))
 				for pl in plink:
 					cmdr.append("--link-dest=" + pl )
 				if tmpfile and d == tmpfile:
