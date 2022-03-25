@@ -45,19 +45,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
-from __future__ import print_function
-
-def minPythonVersion(major, minor):
-	"""
-		Returns true if current python version is equal or more recent than
-		given one
-	"""
-	if sys.version_info[0] > major:
-		return True
-	if sys.version_info[0] == major and sys.version_info[1] >= minor:
-		return True
-	return False
-
 import os, sys, socket, subprocess, threading, gzip, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
 import argparse
@@ -75,6 +62,7 @@ from email.mime.multipart import MIMEMultipart
 CONFIGFILE = "/etc/jabs/jabs.cfg"
 VERSION = "jabs v.1.7"
 CACHEDIR = "/var/cache/jabs"
+MINPYTHON = (3, 5)
 
 # Useful regexp
 rpat = re.compile('{setname}')
@@ -375,6 +363,10 @@ class Jabs:
 	def __init__(self):
 		#TODO: Temporary debug level setting, will use logging instead
 		self.debug = 0
+
+		if sys.version_info[0] < MINPYTHON[0] or \
+				sys.version_info[0] == MINPYTHON[0] and sys.version_info[1] < MINPYTHON[1]:
+			raise RuntimeError('At least python {}.{} is required to run this script'.format(*MINPYTHON))
 
 	def runFromCommandLine(self) -> int:
 		''' Parses the command line and runs JABS
@@ -922,10 +914,7 @@ $backuplist
 							msg.attach(att)
 
 					# Send the message
-					if minPythonVersion(2, 6):
-						smtp = smtplib.SMTP(timeout=300)
-					else:
-						smtp = smtplib.SMTP()
+					smtp = smtplib.SMTP(timeout=300)
 					#smtp.set_debuglevel(1)
 					if s.smtphost:
 						smtp.connect(s.smtphost)
