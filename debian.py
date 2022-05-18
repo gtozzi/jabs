@@ -126,7 +126,7 @@ class Packager:
 				f.write("{}: {}\n".format(key, value))
 
 		# Finally build the debian package
-		cmd = ['dpkg-deb', '--build', '--root-owner-group', basePath]
+		cmd = ['dpkg-deb', '--build', '--root-owner-group', '-Zgzip', basePath]
 		self._log.debug('Running %s', cmd)
 		subprocess.check_call(cmd)
 		pkgName = baseDir + '.deb'
