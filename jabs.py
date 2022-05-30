@@ -166,7 +166,7 @@ class JabsConfig(configparser.ConfigParser):
 						d = int(i[:-1])
 			return timedelta(days=d,hours=h,minutes=m,seconds=s)
 		elif vtype == 'timerange':
-			return map(lambda s: wrapper(time,map(int,s.split(':'))), configparser.ConfigParser.get(self, section, name).strip().split('-'))
+			return tuple(map(lambda s: wrapper(time,map(int,s.split(':'))), configparser.ConfigParser.get(self, section, name).strip().split('-')))
 		else:
 			raise RuntimeError("Unvalid vtype %s" % vtype)
 
@@ -403,7 +403,15 @@ class Jabs:
 		elif args.quiet:
 			self.debug = -1
 
-		return self.run(args.configfile, args.cachedir, args.sets, args.force, args.batch, args.safe)
+		return self.run(
+			cfgPath = args.configfile,
+			cacheDir = args.cachedir,
+			pidFilePath = args.pidfile,
+			onlySets = args.sets,
+			force = args.force,
+			batch = args.batch,
+			safe = args.safe
+		)
 
 
 	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str=None, onlySets:list=None, force:bool=False, batch:bool=False, safe:bool=False) -> int:
