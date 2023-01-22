@@ -42,6 +42,7 @@ CONTROL_TEMPLATE = {
 	'Essential': 'no',
 	'Maintainer': 'gabriele@tozzi.eu',
 	'Depends': 'python3',
+	'Recommends': 'rsync | rclone',
 	'Description': """JABS - Just Another Backup Script
         This is a simple and powerful rsync-based backup script.
  .
