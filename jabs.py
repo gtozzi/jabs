@@ -60,7 +60,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 CONFIGFILE = "/etc/jabs/jabs.cfg"
-VERSION = "jabs v.1.7"
+VERSION = "jabs v.1.7.2"
 CACHEDIR = "/var/cache/jabs"
 MINPYTHON = (3, 5)
 
@@ -324,8 +324,8 @@ class BackupSet:
 		self.deletelist = config.getlist('DELETELIST', self.name, [])
 		self.ionice = config.getint('IONICE', self.name, 0)
 		self.nice = config.getint('NICE', self.name, 0)
-		self.rsync_opts = config.getlist('RSYNC_OPTS', self.name)
-		self.rclone_opts = config.getlist('RCLONE_OPTS', self.name)
+		self.rsync_opts = config.getlist('RSYNC_OPTS', self.name, [])
+		self.rclone_opts = config.getlist('RCLONE_OPTS', self.name, [])
 		self.src = config.getstr('SRC', self.name)
 		self.dst = config.getstr('DST', self.name)
 		self.sleep = config.getint('SLEEP', self.name, 0)
