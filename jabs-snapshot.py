@@ -30,7 +30,7 @@ import configparser
 import subprocess
 
 # Should stay in sunc with jabs
-VERSION = "jabs-snapshot v.1.7"
+VERSION = "jabs-snapshot v.1.7.2"
 
 # Default values for configuration
 CONFIG_DEFAULTS = {
