@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 
 """ @package docstring
-JABS - Just Another Backup Script - Binary entry point
+JABS - Just Another Backup Script
 
 @author Gabriele Tozzi <gabriele@tozzi.eu>
 This program is free software: you can redistribute it and/or modify
@@ -17,8 +16,9 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import sys
-import jabs.jabs
 
+MINPYTHON = (3, 5)
 
-if __name__ == '__main__':
-	sys.exit(jabs.jabs.runFromCommandLine())
+if sys.version_info[0] < MINPYTHON[0] or \
+	sys.version_info[0] == MINPYTHON[0] and sys.version_info[1] < MINPYTHON[1]:
+	raise RuntimeError('At least python {}.{} is required to run this script'.format(*MINPYTHON))

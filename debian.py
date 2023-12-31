@@ -22,13 +22,15 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import os
-import re
-import ast
 import math
 import shutil
+import pathlib
 import logging
+import zipfile
 import tempfile
 import subprocess
+
+import jabs.consts
 
 
 PACKAGE_NAME = 'jabs'
@@ -41,7 +43,7 @@ CONTROL_TEMPLATE = {
 	'Architecture': 'all',
 	'Essential': 'no',
 	'Maintainer': 'gabriele@tozzi.eu',
-	'Depends': 'python3, python3-dateutil',
+	'Depends': 'python3, python3-dateutil, python3-paramiko',
 	'Recommends': 'rsync | rclone',
 	'Description': """JABS - Just Another Backup Script
         This is a simple and powerful rsync-based backup script.
@@ -63,7 +65,6 @@ CONTROL_TEMPLATE = {
 class Packager:
 	''' Utility class for creating a JABS debian package '''
 
-	VER_PARSER = re.compile(r"^jabs(?:-snapshot)\s+v.([0-9.]+)$")
 	TEMP_PREFIX = 'jabs_build_'
 	DEB_VER = 1
 
@@ -75,27 +76,33 @@ class Packager:
 		''' Builds the debian package
 		@param clean bool: When True, cleans the temporary directory
 		'''
+		whl_path = self.buildPy()
 		tpl = self.checkAndGatherInfo()
 
 		if clean:
 			dir = tempfile.TemporaryDirectory(prefix=self.TEMP_PREFIX)
 			self._log.debug('Building into "%s"', dir.name)
 			with dir as rootDir:
-				self.__build(rootDir, tpl)
+				self.__build(rootDir, whl_path, tpl)
 		else:
 			rootDir = tempfile.mkdtemp(prefix=self.TEMP_PREFIX)
 			self._log.debug('Building into "%s"', rootDir)
-			self.__build(rootDir, tpl)
+			self.__build(rootDir, whl_path, tpl)
 
-	def __build(self, rootDir, tpl):
+	def __build(self, rootDir:pathlib.Path, whl_path: pathlib.Path, tpl:str):
 		# Create the base dir
-		baseDir = '{}_{}_{}_{}'.format(PACKAGE_NAME, self.version, self.DEB_VER, tpl['Architecture'])
+		baseDir = '{}_{}_{}_{}'.format(PACKAGE_NAME, jabs.consts.version_str(), self.DEB_VER, tpl['Architecture'])
 		basePath = os.path.join(rootDir, baseDir)
 		os.mkdir(basePath)
 		os.mkdir(os.path.join(basePath, 'DEBIAN'))
 
-		# Copy the files (read sizes and create conffile meanwhile)
 		roughSize = 0
+
+		# Unpack the whl and account for size
+		with zipfile.ZipFile(whl_path, 'r') as whl:
+			whl.extractall(directory_to_extract_to)
+
+		# Copy the files (read sizes and create conffile meanwhile)
 		tocopy = {
 			('usr', 'bin'): ( ('jabs.py', 0o755), ('jabs-snapshot.py', 0o755) ),
 			('etc', 'jabs'): ( ('jabs.cfg', 0o600), ('jabs-snapshot.cfg', 0o600) ),
@@ -146,14 +153,9 @@ class Packager:
 		#TODO: Run tests
 
 		tpl = CONTROL_TEMPLATE
-		jsn = __import__('jabs-snapshot')
 
 		# Detect version
-		m = self.VER_PARSER.match(jsn.VERSION)
-		if not m:
-			raise RuntimeError('jabs-snapshot version not parsed: {}'.format(jsn.VERSION))
-		self.version = m.group(1)
-		tpl['Version'] = "{}+{}".format(self.version, self.DEB_VER)
+		tpl['Version'] = "{}+{}".format(jabs.consts.version_str(), self.DEB_VER)
 
 		# Read description
 		#with open('jabs.py', 'rt') as f:
@@ -165,6 +167,15 @@ class Packager:
 		self._log.debug('INFO: %s', tpl)
 		return tpl
 
+	def buildPy(self) -> pathlib.Path:
+		''' Runs the python build
+		@returns built whl path
+		'''
+		cmd = ('python3', '-m', 'build')
+		subprocess.check_call(cmd)
+		whl_path = pathlib.Path('dist/jabs-{}-py3-none-any.whl'.format(jabs.consts.version_str()))
+		assert whl_path.exists() and whl_path.is_file(), whl_path
+		return whl_path
 
 
 if __name__ == '__main__':

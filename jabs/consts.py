@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 
 """ @package docstring
-JABS - Just Another Backup Script - Binary entry point
+JABS - Just Another Backup Script
 
 @author Gabriele Tozzi <gabriele@tozzi.eu>
 This program is free software: you can redistribute it and/or modify
@@ -16,9 +15,8 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
-import sys
-import jabs.jabs
+__version__ = (1, 8)
 
 
-if __name__ == '__main__':
-	sys.exit(jabs.jabs.runFromCommandLine())
+def version_str() -> str:
+	return '.'.join(map(str, __version__))
