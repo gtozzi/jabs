@@ -31,7 +31,6 @@ import argparse
 
 from . import consts
 
-# Should stay in sunc with jabs
 VERSION = "jabs-snapshot v." + consts.version_str()
 
 # Default values for configuration
