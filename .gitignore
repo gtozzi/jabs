@@ -1,3 +1,5 @@
 *.pyc
 *.deb
 .vscode
+jabs.egg-info
+

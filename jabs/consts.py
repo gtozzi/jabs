@@ -16,6 +16,8 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 __version__ = (1, 8)
+__author__ = 'Gabriele Tozzi'
+__author_email__ = 'gabriele@tozzi.eu'
 
 
 def version_str() -> str:

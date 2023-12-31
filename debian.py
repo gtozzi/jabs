@@ -69,7 +69,7 @@ class Packager:
 	DEB_VER = 1
 
 	def __init__(self):
-		self.path = os.path.abspath(os.path.dirname(__file__))
+		self.path = pathlib.Path(__file__).parent.absolute()
 		self._log = logging.getLogger()
 
 	def build(self, clean=True):
@@ -89,18 +89,22 @@ class Packager:
 			self._log.debug('Building into "%s"', rootDir)
 			self.__build(rootDir, whl_path, tpl)
 
-	def __build(self, rootDir:pathlib.Path, whl_path: pathlib.Path, tpl:str):
+	def __build(self, rootDir:pathlib.Path|str, whl_path: pathlib.Path|str, tpl:str):
 		# Create the base dir
+		rootDir = pathlib.Path(rootDir)
 		baseDir = '{}_{}_{}_{}'.format(PACKAGE_NAME, jabs.consts.version_str(), self.DEB_VER, tpl['Architecture'])
-		basePath = os.path.join(rootDir, baseDir)
-		os.mkdir(basePath)
-		os.mkdir(os.path.join(basePath, 'DEBIAN'))
+		basePath = rootDir / baseDir
+		basePath.mkdir()
+		debPath = basePath / 'DEBIAN'
+		debPath.mkdir()
+		pythonPath = basePath / 'usr' / 'lib' / 'python3' / 'dist-packages' / 'jabs'
+		pythonPath.mkdir(parents=True)
 
 		roughSize = 0
 
 		# Unpack the whl and account for size
 		with zipfile.ZipFile(whl_path, 'r') as whl:
-			whl.extractall(directory_to_extract_to)
+			whl.extractall(pythonPath)
 
 		# Copy the files (read sizes and create conffile meanwhile)
 		tocopy = {
@@ -108,16 +112,18 @@ class Packager:
 			('etc', 'jabs'): ( ('jabs.cfg', 0o600), ('jabs-snapshot.cfg', 0o600) ),
 			('etc', 'cron.d'): ( ('example.crontab', 0o644, 'jabs'), ),
 		}
-		with open(os.path.join(basePath, 'DEBIAN', 'conffiles'), 'wt') as cf:
+		with open(debPath / 'conffiles', 'wt') as cf:
 			for path, files in tocopy.items():
-				fullPath = os.path.join(basePath, *path)
-				os.makedirs(fullPath)
+				fullPath = basePath
+				for pel in path:
+					fullPath /= pel
+				fullPath.mkdir(parents=True)
 				for finfo in files:
-					src = os.path.join(self.path, finfo[0])
+					src = self.path / finfo[0]
 					dstname = finfo[2] if len(finfo) > 2 else finfo[0]
-					dst = os.path.join(fullPath, dstname)
+					dst = fullPath / dstname
 					self._log.debug('Copying "%s" as "%s"', src, dst)
-					roughSize += os.path.getsize(src)
+					roughSize += src.stat().st_size
 					shutil.copyfile(src, dst)
 					os.chmod(dst, finfo[1])
 
@@ -149,7 +155,6 @@ class Packager:
 	def checkAndGatherInfo(self):
 		''' Run some consistency checks and gather info
 		@return dict Debian control template '''
-		#TODO: Compare jabs-snapshot version with jabs version
 		#TODO: Run tests
 
 		tpl = CONTROL_TEMPLATE
@@ -171,7 +176,7 @@ class Packager:
 		''' Runs the python build
 		@returns built whl path
 		'''
-		cmd = ('python3', '-m', 'build')
+		cmd = ('python3', '-m', 'build', '--no-isolation')
 		subprocess.check_call(cmd)
 		whl_path = pathlib.Path('dist/jabs-{}-py3-none-any.whl'.format(jabs.consts.version_str()))
 		assert whl_path.exists() and whl_path.is_file(), whl_path
