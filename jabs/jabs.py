@@ -147,7 +147,7 @@ class JabsConfig(configparser.ConfigParser):
 		elif vtype == 'bool':
 			return configparser.ConfigParser.getboolean(self, section, name)
 		elif vtype == 'list':
-			return [ x.strip() for x in configparser.ConfigParser.get(self, section, name).strip().split(self.LIST_SEP) ]
+			return [ x.strip() for x in configparser.ConfigParser.get(self, section, name).strip().split(self.LIST_SEP) if x != '' ]
 		elif vtype == 'date':
 			return wrapper(date, map(int, configparser.ConfigParser.get(self, section, name).strip().split('-',3)))
 		elif vtype == 'interval':
@@ -727,29 +727,44 @@ $backuplist
 				else:
 					nlvl = 1
 				sl.add("Commandline:", cmd, lvl=nlvl)
-				sl.add("Will write tar STDOUT to", tarlogfile, lvl=1)
+				if tarlogfile:
+					sl.add("Will write STDOUT and STDERR to", tarlogfile, lvl=1)
 
 				if not safe:
 					# Execute the backup
 					sys.stdout.flush()
-					if s.compresslog:
-						TARLOGFILE = gzip.open(tarlogfile, 'wb')
+
+					if not tarlogfile:
+						tarlogfile_handle = None
+					elif s.compresslog:
+						tarlogfile_handle = gzip.open(tarlogfile, 'wb')
 					else:
-						TARLOGFILE = open(tarlogfile, 'wb')
+						tarlogfile_handle = open(tarlogfile, 'wb')
+
 					try:
 						p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
 					except OSError as e:
 						print("ERROR: Unable to locate file", e.filename)
 						print("Path: ", os.environ['PATH'])
 						return 1
-					spoct = SubProcessCommStdoutThread(p, TARLOGFILE)
+
+					if tarlogfile_handle:
+						spoct = SubProcessCommStdoutThread(p, tarlogfile_handle)
 					spect = SubProcessCommStderrThread(p)
-					spoct.start()
+
+					if tarlogfile_handle:
+						spoct.start()
 					spect.start()
+
 					ret = p.wait()
-					spoct.join()
+
+					if tarlogfile_handle:
+						spoct.join()
 					spect.join()
-					TARLOGFILE.close()
+
+					if tarlogfile_handle:
+						tarlogfile_handle.close()
+
 					if ret != 0:
 						setsuccess = False
 					sl.add("Done. Exit status:", ret)
@@ -957,3 +972,7 @@ def runFromCommandLine() -> int:
 		batch = args.batch,
 		safe = args.safe
 	)
+
+
+if __name__ == '__main__':
+	sys.exit(runFromCommandLine())

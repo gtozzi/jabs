@@ -1,8 +1,10 @@
 # JABS linux based makefile
 
 tests:
+	./dockertests.py
+
+oldtests:
 	python3 -m unittest tests
-	python2 -m unittest tests
 
 # Generates a pypy package
 py:
