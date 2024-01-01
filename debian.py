@@ -26,7 +26,7 @@ import math
 import shutil
 import pathlib
 import logging
-import zipfile
+import tarfile
 import tempfile
 import subprocess
 
@@ -76,20 +76,20 @@ class Packager:
 		''' Builds the debian package
 		@param clean bool: When True, cleans the temporary directory
 		'''
-		whl_path = self.buildPy()
+		py_src_path = self.buildPy()
 		tpl = self.checkAndGatherInfo()
 
 		if clean:
 			dir = tempfile.TemporaryDirectory(prefix=self.TEMP_PREFIX)
 			self._log.debug('Building into "%s"', dir.name)
 			with dir as rootDir:
-				self.__build(rootDir, whl_path, tpl)
+				self.__build(rootDir, py_src_path, tpl)
 		else:
 			rootDir = tempfile.mkdtemp(prefix=self.TEMP_PREFIX)
 			self._log.debug('Building into "%s"', rootDir)
-			self.__build(rootDir, whl_path, tpl)
+			self.__build(rootDir, py_src_path, tpl)
 
-	def __build(self, rootDir:pathlib.Path|str, whl_path: pathlib.Path|str, tpl:str):
+	def __build(self, rootDir:pathlib.Path|str, py_src_path: pathlib.Path|str, tpl:str):
 		# Create the base dir
 		rootDir = pathlib.Path(rootDir)
 		baseDir = '{}_{}_{}_{}'.format(PACKAGE_NAME, jabs.consts.version_str(), self.DEB_VER, tpl['Architecture'])
@@ -97,14 +97,30 @@ class Packager:
 		basePath.mkdir()
 		debPath = basePath / 'DEBIAN'
 		debPath.mkdir()
-		pythonPath = basePath / 'usr' / 'lib' / 'python3' / 'dist-packages' / 'jabs'
+		binPath = basePath / 'usr' / 'bin'
+		pythonRelativePkgPath = pathlib.PurePosixPath('usr/lib/python3/dist-packages')
+		pythonPath = basePath / pythonRelativePkgPath
 		pythonPath.mkdir(parents=True)
 
-		roughSize = 0
+		# Unpack the python source (and account for its size)
+		tar_root = pathlib.PurePosixPath('jabs-' + jabs.consts.version_str())
+		with tarfile.open(py_src_path, 'r') as tar:
+			tar_src_root = tar_root / 'jabs'
+			tar_egginfo_root = tar_root / 'jabs.egg-info'
 
-		# Unpack the whl and account for size
-		with zipfile.ZipFile(whl_path, 'r') as whl:
-			whl.extractall(pythonPath)
+			members = []
+			for member in tar.getmembers():
+				path = pathlib.PurePosixPath(member.name)
+				assert path.is_relative_to(tar_root), path
+
+				if not path.is_relative_to(tar_src_root) and not path.is_relative_to(tar_egginfo_root):
+					continue
+
+				new_path = path.relative_to(tar_root)
+				members.append(member.replace(name=new_path))
+
+			roughSize = sum([ x.size for x in members ])
+			tar.extractall(pythonPath, members=members, filter='fully_trusted')
 
 		# Copy the files (read sizes and create conffile meanwhile)
 		tocopy = {
@@ -131,6 +147,16 @@ class Packager:
 					if path[0] == 'etc':
 						cf.write(os.path.join(os.sep, *path, dstname) + "\n")
 
+		# Symlink files (link name -> destination)
+		tosymlink = [
+			#( binPath / 'jabs.py', pathlib.PurePath('/') / pythonRelativePkgPath / 'jabs' / 'jabs.py' ),
+			#( binPath / 'jabs-snapshot.py', pathlib.PurePath('/') / pythonRelativePkgPath / 'jabs' / 'snapshot.py' ),
+			#( binPath / 'jabs-btrfs.py', pathlib.PurePath('/') / pythonRelativePkgPath / 'jabs' / 'btrfs.py' ),
+		]
+		for link_name, link_dest in tosymlink:
+			link_name.parent.mkdir(parents=True, exist_ok=True)
+			os.symlink(link_dest, link_name)
+
 		# Update the installed size
 		tpl['Installed-Size'] = math.ceil(roughSize / 1024)
 
@@ -143,13 +169,14 @@ class Packager:
 		cmd = ['dpkg-deb', '--build', '--root-owner-group', '-Zgzip', basePath]
 		self._log.debug('Running %s', cmd)
 		subprocess.check_call(cmd)
+
 		pkgName = baseDir + '.deb'
-		pkgPath = os.path.join(rootDir, pkgName)
+		pkgPath = rootDir / pkgName
 		if not os.path.exists(pkgPath):
 			raise RuntimeError('Package file "{}" not found'.format(pkgPath))
 
 		# Move the generated file here
-		shutil.copyfile(pkgPath, os.path.join(self.path, pkgName))
+		shutil.copyfile(pkgPath, self.path / 'dist' / pkgName)
 		self._log.info('Package %s generated', pkgName)
 
 	def checkAndGatherInfo(self):
@@ -173,14 +200,15 @@ class Packager:
 		return tpl
 
 	def buildPy(self) -> pathlib.Path:
-		''' Runs the python build
-		@returns built whl path
+		''' Runs the python built source package
+		@returns built src path
 		'''
 		cmd = ('python3', '-m', 'build', '--no-isolation')
 		subprocess.check_call(cmd)
-		whl_path = pathlib.Path('dist/jabs-{}-py3-none-any.whl'.format(jabs.consts.version_str()))
-		assert whl_path.exists() and whl_path.is_file(), whl_path
-		return whl_path
+		py_src_path = pathlib.Path('dist/jabs-{}.tar.gz'.format(jabs.consts.version_str()))
+		assert py_src_path.exists() and py_src_path.is_file(), py_src_path
+
+		return py_src_path
 
 
 if __name__ == '__main__':

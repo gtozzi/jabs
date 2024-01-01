@@ -24,7 +24,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 import os
 import unittest
 
-import jabs.jabs
+import jabs.sync
 import jabs.snapshot
 
 class TestRun(unittest.TestCase):
@@ -36,7 +36,7 @@ class TestRun(unittest.TestCase):
 		if not os.path.exists(DEST):
 			os.mkdir(DEST)
 
-		j = jabs.jabs.Jabs()
+		j = jabs.sync.Jabs()
 		j.debug = 1
 		res = j.run('jabs.cfg', '/tmp/', pidFilePath='/tmp/jabs.pid', onlySets=['Test'], force=True)
 		self.assertTrue(res == 0, res)

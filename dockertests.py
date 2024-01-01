@@ -85,16 +85,17 @@ class DockerTests(unittest.TestCase):
 		self.copyFileToContainer('jabs.cfg')
 
 		print('Running JABS…')
-		self.runCommandInContainer(f'python3 -m jabs.jabs -v -c /jabs.cfg -f Test')
+		self.runCommandInContainer(f'python3 -m jabs.sync -v -c /jabs.cfg -f Test')
 
 	def test_deb_run(self):
 		deb_name = 'jabs_{}_1_all.deb'.format(jabs.consts.version_str())
-		print(f'Copying DEB package {deb_name}')
-		self.copyFileToContainer(deb_name)
+		deb_path = pathlib.Path('dist') / deb_name
+		print(f'Copying DEB package {deb_path}')
+		self.copyFileToContainer(deb_path)
 
 		print('Installing DEB…')
 		self.runCommandInContainer('apt-get -qq update')
-		self.runCommandInContainer(f'apt-get -qq install ./{deb_name}')
+		self.runCommandInContainer(f'apt-get -qq install ./{deb_path}')
 
 		print('Running JABS…')
 		self.runCommandInContainer(f'jabs.py -v -f Test')

@@ -17,8 +17,11 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import sys
-import jabs.jabs
+
+# Prevent name clash with current directory
+sys.path = sys.path[1:]
+import jabs.sync
 
 
 if __name__ == '__main__':
-	sys.exit(jabs.jabs.runFromCommandLine())
+	sys.exit(jabs.sync.runFromCommandLine())

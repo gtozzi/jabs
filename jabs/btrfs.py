@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 """ @package docstring
 JABS - Just Another Backup Script - Btrfs backup tool
 
