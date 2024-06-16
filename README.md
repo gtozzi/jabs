@@ -29,7 +29,7 @@ Place a cron entry like this one:
 
     MAILTO="your-email-address"
     
-    */5 * * * *     root    /usr/local/bin/jabs.py -c /usr/local/etc/jabs.cfg -b -q
+    */5 * * * *     root    run-one /usr/local/bin/jabs.py -c /usr/local/etc/jabs.cfg -b -q
 
 The script will end silently when has nothing to do.
 Where there is a "soft" error or when a backup is completed, you'll receive

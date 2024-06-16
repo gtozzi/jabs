@@ -17,9 +17,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import sys
-
-# Prevent name clash with current directory
-sys.path = sys.path[1:]
 import jabs.sync
 
 
