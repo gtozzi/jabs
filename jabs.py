@@ -60,9 +60,9 @@ from email.mime.multipart import MIMEMultipart
 
 # Default configuration
 CONFIGFILE = "/etc/jabs/jabs.cfg"
-VERSION = "jabs v.1.7.2"
+VERSION = "jabs v.1.8"
 CACHEDIR = "/var/cache/jabs"
-MINPYTHON = (3, 5)
+MINPYTHON = (3, 9)
 
 # Useful regexp
 rpat = re.compile('{setname}')
@@ -349,6 +349,9 @@ class BackupSet:
 		self.smtphost = config.getstr('SMTPHOST', self.name, None)
 		self.smtpuser = config.getstr('SMTPUSER', self.name, None)
 		self.smtppass = config.getstr('SMTPPASS', self.name, None)
+		self.smtpport = config.getint('SMTPPORT', self.name, None)
+		self.smtpssl = config.getboolean('SMTPSSL', self.name, True)
+		self.smtpssl = config.getint('SMTPTIMEOUT', self.name, 300)
 		self.compresslog = config.getstr('COMPRESSLOG', self.name, True)
 
 		self.remsrc = risremote.match(self.src)
@@ -889,7 +892,7 @@ $backuplist
 					sl.add("Skipping sending detailed logs to", s.mailto)
 				else:
 					if s.smtphost:
-						sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost)
+						sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost, "port", s.smtpport, "ssl", s.smtpssl)
 					else:
 						sl.add("Sending detailed logs to", s.mailto, "using local smtp")
 
@@ -930,12 +933,16 @@ $backuplist
 							msg.attach(att)
 
 					# Send the message
-					smtp = smtplib.SMTP(timeout=300)
-					#smtp.set_debuglevel(1)
 					if s.smtphost:
-						smtp.connect(s.smtphost)
+						smtp_port = 0 if s.smtpport is None else s.smtpport
+						if s.smtpssl:
+							smtp = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
+						else:
+							smtp = smtplib.SMTP(s.smtphost, smtp_port, timeout=s.smtptimeout)
 					else:
+						smtp = smtplib.SMTP(timeout=s.smtptimeout)
 						smtp.connect()
+					#smtp.set_debuglevel(1)
 					if s.smtpuser or s.smtppass:
 						smtp.login(s.smtpuser, s.smtppass)
 					smtp.sendmail(m_from, s.mailto, msg.as_string())
