@@ -212,7 +212,8 @@ class BackupSet:
 		self.umount = config.getstr('UMOUNT', self.name, None)
 		self.disabled = config.getboolean('DISABLED', self.name, False)
 		self.pre = config.getstr('PRE', self.name, None, True)
-		self.skiponpreerror = config.getboolean('SKIPONPREERROR', self.name, None, False)
+		self.skiponpreerror = config.getboolean('SKIPONPREERROR', self.name, False)
+		self.ignorevanished = config.getboolean('IGNOREVANISHED', self.name, False)
 		self.smtphost = config.getstr('SMTPHOST', self.name, None)
 		self.smtpuser = config.getstr('SMTPUSER', self.name, None)
 		self.smtppass = config.getstr('SMTPPASS', self.name, None)
@@ -645,6 +646,8 @@ $backuplist
 						badoutput = False
 						for line in spect.output.splitlines():
 							if b'(will try again)' in line:
+								continue
+							if s.ignorevanished and line.startswith(b'file has vanished: '):
 								continue
 							badoutput = True
 							break
