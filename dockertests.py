@@ -69,9 +69,10 @@ class DockerTests(unittest.TestCase):
 		self.docker.close()
 
 	def test_pip_run(self):
+		""" Tetsing PIP run """
 		print('Installing PIP…')
 		self.runCommandInContainer('apt-get -qq update')
-		self.runCommandInContainer('apt-get -qq install python3-pip')
+		self.runCommandInContainer('apt-get -qq install python3-pip rsync')
 
 		whl_name = 'jabs-{}-py3-none-any.whl'.format(jabs.consts.version_str())
 		whl_path = pathlib.Path('dist') / whl_name
@@ -88,6 +89,7 @@ class DockerTests(unittest.TestCase):
 		self.runCommandInContainer(f'python3 -m jabs.sync -v -c /jabs.cfg -f Test')
 
 	def test_deb_run(self):
+		""" Resting Debian run """
 		deb_name = 'jabs_{}_1_all.deb'.format(jabs.consts.version_str())
 		deb_path = pathlib.Path('dist') / deb_name
 		print(f'Copying DEB package {deb_path}')
@@ -102,4 +104,5 @@ class DockerTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-	unittest.main()
+	test = unittest.main(exit=False)
+	print('Success:', test.result.wasSuccessful())

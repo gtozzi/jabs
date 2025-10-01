@@ -216,6 +216,9 @@ class BackupSet:
 		self.smtphost = config.getstr('SMTPHOST', self.name, None)
 		self.smtpuser = config.getstr('SMTPUSER', self.name, None)
 		self.smtppass = config.getstr('SMTPPASS', self.name, None)
+		self.smtpport = config.getint('SMTPPORT', self.name, None)
+		self.smtpssl = config.getboolean('SMTPSSL', self.name, True)
+		self.smtptimeout = config.getint('SMTPTIMEOUT', self.name, 300)
 		self.compresslog = config.getstr('COMPRESSLOG', self.name, True)
 
 		self.remsrc = risremote.match(self.src)
@@ -650,7 +653,7 @@ $backuplist
 							sl.add("ERROR: stderr was not empty:", -1)
 						else:
 							sl.add("WARNING: stderr was not empty (but no errors detected):", -1)
-						sl.add(spect.output, -1)
+						sl.add('- ' + spect.output.decode('utf-8', errors='replace').rstrip('\n'), -1)
 
 				if s.sleep > 0:
 					if safe:
@@ -723,7 +726,7 @@ $backuplist
 					sl.add("Skipping sending detailed logs to", s.mailto)
 				else:
 					if s.smtphost:
-						sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost)
+						sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost, "port", s.smtpport, "ssl", s.smtpssl)
 					else:
 						sl.add("Sending detailed logs to", s.mailto, "using local smtp")
 
@@ -764,12 +767,16 @@ $backuplist
 							msg.attach(att)
 
 					# Send the message
-					smtp = smtplib.SMTP(timeout=300)
-					#smtp.set_debuglevel(1)
 					if s.smtphost:
-						smtp.connect(s.smtphost)
+						smtp_port = 0 if s.smtpport is None else s.smtpport
+						if s.smtpssl:
+							smtp = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
+						else:
+							smtp = smtplib.SMTP(s.smtphost, smtp_port, timeout=s.smtptimeout)
 					else:
+						smtp = smtplib.SMTP(timeout=s.smtptimeout)
 						smtp.connect()
+					#smtp.set_debuglevel(1)
 					if s.smtpuser or s.smtppass:
 						smtp.login(s.smtpuser, s.smtppass)
 					smtp.sendmail(m_from, s.mailto, msg.as_string())
@@ -802,6 +809,7 @@ def runFromCommandLine() -> int:
 	'''
 
 	parser = argparse.ArgumentParser(description=VERSION)
+	parser.add_argument('--version', action='version', version=VERSION)
 	parser.add_argument("-c", "--config", dest="configfile", default=CONFIGFILE,
 		help="Config file name")
 	parser.add_argument("-a", "--cachedir", default=CACHEDIR,

@@ -17,7 +17,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import sys
 
-MINPYTHON = (3, 5)
+MINPYTHON = (3, 9)
 
 if sys.version_info[0] < MINPYTHON[0] or \
 	sys.version_info[0] == MINPYTHON[0] and sys.version_info[1] < MINPYTHON[1]:

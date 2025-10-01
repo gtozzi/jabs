@@ -17,6 +17,12 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import sys
+import pathlib
+try:
+	# Remove current folder from path to avoid import conflicts
+	sys.path.remove(str(pathlib.Path(__file__).parent.resolve()))
+except ValueError:
+	pass
 import jabs.sync
 
 
