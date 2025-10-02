@@ -70,6 +70,30 @@ rdir = re.compile('{dirname}')
 risremote = re.compile(r'(.*@.*):{1,2}(.*)')
 rlsparser = re.compile(r'^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2})\s+(.+)$')
 
+# Rsync exit codes from https://lxadm.com/rsync-exit-codes/
+RSYNC_EXIT_CODES = {
+	 0: 'Success. The rsync command completed successfully without any errors.',
+	 1: 'Syntax or usage error. There was a problem with the syntax of the rsync command or with the options specified.',
+	 2: 'Protocol incompatibility. There was a problem with the protocol version or negotiation between the rsync client and server.',
+	 3: 'Errors selecting input/output files, dirs. There was a problem with the source or destination file or directory specified in the rsync command.',
+	 4: 'Requested action not supported: An attempt was made to use an unsupported action or option.',
+	 5: 'Error starting client-server protocol. There was an error starting the client-server protocol.',
+	 6: 'Daemon unable to append to log-file. The rsync daemon was unable to write to its log file.',
+	10: 'Error in socket I/O. There was an error with the socket input/output.',
+	11: 'Error in file I/O. There was an error reading or writing to a file.',
+	12: 'Error in rsync protocol data stream. There was an error in the rsync protocol data stream.',
+	13: 'Errors with program diagnostics. There was an error generating program diagnostics.',
+	14: 'Error in IPC code. There was an error in the inter-process communication (IPC) code.',
+	20: 'Received SIGUSR1 or SIGINT. The rsync process was interrupted by a signal.',
+	21: 'Some error returned by waitpid(). An error occurred while waiting for a child process to complete.',
+	22: 'Error allocating core memory buffers. There was an error allocating memory buffers.',
+	23: 'Partial transfer due to error. The rsync command completed with an error, but some files may have been transferred successfully.',
+	24: 'Partial transfer due to vanished source files. Some source files disappeared before they could be transferred.',
+	25: 'The --max-delete limit stopped deletions.',
+	30: 'Timeout in data send/receive.',
+	35: 'Timeout waiting for daemon connection',
+}
+
 # ------------ FUNCTIONS AND CLASSES ----------------------
 
 
@@ -637,26 +661,47 @@ $backuplist
 					if tarlogfile_handle:
 						tarlogfile_handle.close()
 
-					if ret != 0:
+					goodrets = { 0 }
+					if s.ignorevanished:
+						goodrets.add(24)
+
+					if ret in goodrets:
+						retmessage = 'Good'
+					else:
+						retmessage = 'Bad'
 						setsuccess = False
-					sl.add("Done. Exit status:", ret)
+					retdescr = f"({RSYNC_EXIT_CODES[ret]})" if ret in RSYNC_EXIT_CODES else ''
+					sl.add(f"Done. {retmessage} exit status:", ret, retdescr)
 
 					# Analyze STDERR
+					vanish_starts = [
+						b'file has vanished: ',
+						b'rsync warning: some files vanished before they could be transferred',
+					]
+
 					if len(spect.output):
 						badoutput = False
+						quotedstderrlines = []
+
 						for line in spect.output.splitlines():
+							badline = True
+
 							if b'(will try again)' in line:
-								continue
-							if s.ignorevanished and line.startswith(b'file has vanished: '):
-								continue
-							badoutput = True
-							break
+								badline = False
+							elif s.ignorevanished and any([line.startswith(s) for s in vanish_starts]):
+								badline = False
+
+							badoutput = badoutput or badline
+							quotedstderrlines.append('!' if badline else '-' + '> ' + spect.output.decode('utf-8', errors='replace').rstrip('\n'))
+
 						if badoutput:
 							setsuccess = False
-							sl.add("ERROR: stderr was not empty:", -1)
+							sl.add("ERROR: stderr was not empty:")
 						else:
-							sl.add("WARNING: stderr was not empty (but no errors detected):", -1)
-						sl.add('- ' + spect.output.decode('utf-8', errors='replace').rstrip('\n'), -1)
+							sl.add("WARNING: stderr was not empty (but no errors detected):")
+
+						for ql in quotedstderrlines:
+							sl.add(ql)
 
 				if s.sleep > 0:
 					if safe:
