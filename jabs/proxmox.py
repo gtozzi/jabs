@@ -82,7 +82,7 @@ def runFromCommandLine() -> int:
 	logging.basicConfig(level=level, format=format)
 
 	try:
-		main = Main(args.configFile).run()
+		Main(args.configFile).run()
 	except Exception as e:
 		logging.critical(traceback.format_exc())
 		print('ERROR: {}'.format(e))

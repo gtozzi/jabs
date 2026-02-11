@@ -58,9 +58,13 @@ class DockerTests(unittest.TestCase):
 		self.docker = docker.from_env()
 		self.ubuntu = self.docker.containers.run("debian:latest", 'tail -f /dev/null', auto_remove=True, detach=True)
 
-		bck_dest = pathlib.PurePath('/tmp/jabs-backup')
-		print(f'Creating {bck_dest}…')
-		self.runCommandInContainer(f'mkdir {bck_dest}')
+		bck_dests = [
+			pathlib.PurePath('/tmp/jabs-backup'),
+			pathlib.PurePath('/tmp/jabs-backup2'),
+		]
+		for bck_dest in bck_dests:
+			print(f'Creating {bck_dest}…')
+			self.runCommandInContainer(f'mkdir {bck_dest}')
 
 	def tearDown(self):
 		if self.ubuntu is not None:
@@ -72,7 +76,7 @@ class DockerTests(unittest.TestCase):
 		""" Tetsing PIP run """
 		print('Installing PIP…')
 		self.runCommandInContainer('apt-get -qq update')
-		self.runCommandInContainer('apt-get -qq install python3-pip rsync')
+		self.runCommandInContainer('apt-get -qq install python3-pip rsync rclone')
 
 		whl_name = 'jabs-{}-py3-none-any.whl'.format(jabs.consts.version_str())
 		whl_path = pathlib.Path('dist') / whl_name
@@ -85,8 +89,11 @@ class DockerTests(unittest.TestCase):
 		print('Copying jabs.cfg…')
 		self.copyFileToContainer('jabs.cfg')
 
-		print('Running JABS…')
-		self.runCommandInContainer(f'python3 -m jabs.sync -v -c /jabs.cfg -f Test')
+		print('Running JABS Test…')
+		self.runCommandInContainer(f'python3 -m jabs.sync -c /jabs.cfg -f Test')
+
+		print('Running JABS Test-Rclone…')
+		self.runCommandInContainer(f'python3 -m jabs.sync -c /jabs.cfg -f Test-Rclone')
 
 	def test_deb_run(self):
 		""" Resting Debian run """
@@ -99,8 +106,11 @@ class DockerTests(unittest.TestCase):
 		self.runCommandInContainer('apt-get -qq update')
 		self.runCommandInContainer(f'apt-get -qq install ./{deb_path}')
 
-		print('Running JABS…')
-		self.runCommandInContainer(f'jabs.py -v -f Test')
+		print('Running JABS Test…')
+		self.runCommandInContainer(f'jabs.py -f Test')
+
+		print('Running JABS Test-Rclone…')
+		self.runCommandInContainer(f'jabs.py -f Test-Rclone')
 
 
 if __name__ == '__main__':

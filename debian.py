@@ -43,8 +43,8 @@ CONTROL_TEMPLATE = {
 	'Architecture': 'all',
 	'Essential': 'no',
 	'Maintainer': 'gabriele@tozzi.eu',
-	'Depends': 'python3, python3-dateutil, python3-paramiko, python3-proxmoxer',
-	'Recommends': 'rsync | rclone',
+	'Depends': 'python3, python3-dateutil, python3-psutil, python3-paramiko, python3-proxmoxer',
+	'Recommends': 'rsync, rclone',
 	'Description': """JABS - Just Another Backup Script
         This is a simple and powerful rsync-based backup script.
  .

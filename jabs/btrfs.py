@@ -85,7 +85,7 @@ if __name__ == '__main__':
 	logging.basicConfig(level=level, format=format)
 
 	try:
-		main = Main(args.configFile).run(forceLink=args.linklast)
+		main = Main(args.configFile).run()
 	except Exception as e:
 		logging.critical(traceback.format_exc())
 		print('ERROR: {}'.format(e))

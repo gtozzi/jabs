@@ -3,10 +3,10 @@
 """ @package docstring
 JABS - Just Another Backup Script
 
-This is a simple and powerful rsync-based backup script.
+This is a simple and powerful rsync-based backup script (also supports rclone sync).
 
 Main features:
-- Rsync-based: Bandwidth is optimized during transfers
+- Rsync-based: Bandwidth is optimized during transfers (same for rclone)
 - Automatic "Hanoi" backup set rotation
 - Incremental "complete" backups using hard links
 - E-Mail notifications on completion
@@ -44,14 +44,27 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
+from __future__ import annotations
+
+import abc
+import types
+import typing
 import os, sys, socket, subprocess, threading, gzip, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
+psutil:types.ModuleType|None = None
+try:
+	import psutil
+except ModuleNotFoundError:
+	pass
+import json
+import pathlib
 import argparse
 from string import Template
 from time import sleep, mktime
 from datetime import datetime, date, timedelta, time
 import re
 import smtplib
+import email.utils
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
@@ -65,36 +78,198 @@ VERSION = "jabs v." + consts.version_str()
 CACHEDIR = "/var/cache/jabs"
 
 # Useful regexp
-rpat = re.compile('{setname}')
-rdir = re.compile('{dirname}')
 risremote = re.compile(r'(.*@.*):{1,2}(.*)')
 rlsparser = re.compile(r'^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2})\s+(.+)$')
 
-# Rsync exit codes from https://lxadm.com/rsync-exit-codes/
-RSYNC_EXIT_CODES = {
-	 0: 'Success. The rsync command completed successfully without any errors.',
-	 1: 'Syntax or usage error. There was a problem with the syntax of the rsync command or with the options specified.',
-	 2: 'Protocol incompatibility. There was a problem with the protocol version or negotiation between the rsync client and server.',
-	 3: 'Errors selecting input/output files, dirs. There was a problem with the source or destination file or directory specified in the rsync command.',
-	 4: 'Requested action not supported: An attempt was made to use an unsupported action or option.',
-	 5: 'Error starting client-server protocol. There was an error starting the client-server protocol.',
-	 6: 'Daemon unable to append to log-file. The rsync daemon was unable to write to its log file.',
-	10: 'Error in socket I/O. There was an error with the socket input/output.',
-	11: 'Error in file I/O. There was an error reading or writing to a file.',
-	12: 'Error in rsync protocol data stream. There was an error in the rsync protocol data stream.',
-	13: 'Errors with program diagnostics. There was an error generating program diagnostics.',
-	14: 'Error in IPC code. There was an error in the inter-process communication (IPC) code.',
-	20: 'Received SIGUSR1 or SIGINT. The rsync process was interrupted by a signal.',
-	21: 'Some error returned by waitpid(). An error occurred while waiting for a child process to complete.',
-	22: 'Error allocating core memory buffers. There was an error allocating memory buffers.',
-	23: 'Partial transfer due to error. The rsync command completed with an error, but some files may have been transferred successfully.',
-	24: 'Partial transfer due to vanished source files. Some source files disappeared before they could be transferred.',
-	25: 'The --max-delete limit stopped deletions.',
-	30: 'Timeout in data send/receive.',
-	35: 'Timeout waiting for daemon connection',
-}
-
 # ------------ FUNCTIONS AND CLASSES ----------------------
+
+
+class Program(metaclass=abc.ABCMeta):
+	''' Base class for a supported program '''
+
+	SETNAME_PHOLDER = '{setname}'
+	DIRNAME_PHOLDER = '{dirname}'
+
+	def __init__(self, name:str) -> None:
+		self.name = name
+		self.hardlink_support = False
+		self.exit_codes:dict[int,str] = {}
+
+	def __str__(self) -> str:
+		return self.name
+
+	def _get_base_cmd(self) -> list[str]:
+		return [ self.name ]
+
+	def _get_cmd_options(self, bs:BackupSet, plink:list[str]) -> list[str]:
+		opts = bs.program_opts[self.name]
+		cmd = list(map(lambda x: x.replace(self.SETNAME_PHOLDER, bs.name.lower()), opts))
+		if self.hardlink_support:
+			for pl in plink:
+				cmd.append("--link-dest=" + pl )
+		return cmd
+
+	def _get_cmd_srcdst(self, bs:BackupSet, dst:str|pathlib.Path, hanoisuf:str) -> list[str]:
+		if isinstance(dst, pathlib.Path):
+			# If source specification is a full local path (backup file), use it as-is
+			src_str = str(dst)
+		else:
+			src_str = bs.src.replace(self.DIRNAME_PHOLDER, dst)
+
+		dst_str = bs.dst.replace(self.DIRNAME_PHOLDER, str(dst))
+		if len(hanoisuf) > 0:
+			dst_str += bs.sep + hanoisuf
+
+		return [ src_str, dst_str ]
+
+	def get_cmd(self, bs:BackupSet, dst:str|pathlib.Path, hanoisuf:str, plink:list[str]) -> list[str]:
+		''' Returns command line for given set '''
+		cmd = self._get_base_cmd()
+		cmd.extend(self._get_cmd_options(bs, plink))
+		cmd.extend(self._get_cmd_srcdst(bs, dst, hanoisuf))
+		return cmd
+
+	def get_good_exit_codes(self, bs:BackupSet) -> set[int]:
+		return { 0 }
+
+	def get_exit_code_descr(self, code:int) -> str:
+		return self.exit_codes[code] if code in self.exit_codes else ''
+
+	def get_version(self) -> str:
+		cmd = [ self.name, '--version' ]
+		res = subprocess.run(cmd, capture_output=True, check=False, universal_newlines=True, encoding='utf8')
+		if res.returncode:
+			return f"ERROR: " + res.stderr.replace('\n',' - ')
+		else:
+			return res.stdout.splitlines()[0]
+
+	def is_error_output_line(self, stream:str, line:bytes, bs:BackupSet) -> str|None:
+		''' Given an stdout/stderr line, tells if it signals an error
+		@return error reason or None on success '''
+		if stream.lower() == 'stdout':
+			return self.is_error_stdout_line(line, bs)
+		elif stream.lower() == 'stderr':
+			return self.is_error_stderr_line(line, bs)
+		else:
+			raise NotImplementedError(stream)
+
+	def is_error_stdout_line(self, line:bytes, bs:BackupSet) -> str|None:
+		''' Given an stdout line, tells if it signals an error '''
+		return None
+
+	def is_error_stderr_line(self, line:bytes, bs:BackupSet) -> str|None:
+		''' Given an stderr line, tells if it signals an error '''
+		return None
+
+class ProgramRsync(Program):
+	''' Rsync program definition '''
+
+	def __init__(self) -> None:
+		super().__init__('rsync')
+		self.hardlink_support = True
+
+		# Rsync exit codes from https://lxadm.com/rsync-exit-codes/
+		self.exit_codes = {
+			0: 'Success. The rsync command completed successfully without any errors.',
+			1: 'Syntax or usage error. There was a problem with the syntax of the rsync command or with the options specified.',
+			2: 'Protocol incompatibility. There was a problem with the protocol version or negotiation between the rsync client and server.',
+			3: 'Errors selecting input/output files, dirs. There was a problem with the source or destination file or directory specified in the rsync command.',
+			4: 'Requested action not supported: An attempt was made to use an unsupported action or option.',
+			5: 'Error starting client-server protocol. There was an error starting the client-server protocol.',
+			6: 'Daemon unable to append to log-file. The rsync daemon was unable to write to its log file.',
+			10: 'Error in socket I/O. There was an error with the socket input/output.',
+			11: 'Error in file I/O. There was an error reading or writing to a file.',
+			12: 'Error in rsync protocol data stream. There was an error in the rsync protocol data stream.',
+			13: 'Errors with program diagnostics. There was an error generating program diagnostics.',
+			14: 'Error in IPC code. There was an error in the inter-process communication (IPC) code.',
+			20: 'Received SIGUSR1 or SIGINT. The rsync process was interrupted by a signal.',
+			21: 'Some error returned by waitpid(). An error occurred while waiting for a child process to complete.',
+			22: 'Error allocating core memory buffers. There was an error allocating memory buffers.',
+			23: 'Partial transfer due to error. The rsync command completed with an error, but some files may have been transferred successfully.',
+			24: 'Partial transfer due to vanished source files. Some source files disappeared before they could be transferred.',
+			25: 'The --max-delete limit stopped deletions.',
+			30: 'Timeout in data send/receive.',
+			35: 'Timeout waiting for daemon connection',
+		}
+
+	def get_good_exit_codes(self, bs:BackupSet) -> set[int]:
+		goodrets = super().get_good_exit_codes(bs)
+		if bs.ignorevanished:
+			goodrets.add(24)
+		return goodrets
+
+	def is_error_stderr_line(self, line:bytes, bs:BackupSet) -> str|None:
+		vanish_starts = [
+			b'file has vanished: ',
+			b'rsync warning: some files vanished before they could be transferred',
+		]
+
+		if b'(will try again)' in line:
+			return None
+
+		if bs.ignorevanished and any([line.startswith(s) for s in vanish_starts]):
+			return None
+
+		return 'not empty'
+
+class ProgramRclone(Program):
+	''' Rsync program definition '''
+
+	def __init__(self) -> None:
+		super().__init__('rclone')
+		# See https://rclone.org/docs/
+		self.exit_codes = {
+			0: 'Success',
+			1: 'Error not otherwise categorised',
+			2: 'Syntax or usage error',
+			3: 'Directory not found',
+			4: 'File not found',
+			5: 'Temporary error (one that more retries might fix) (Retry errors)',
+			6: 'Less serious errors (like 461 errors from dropbox) (NoRetry errors)',
+			7: 'Fatal error (one that more retries won\'t fix, like account suspended) (Fatal errors)',
+			8: 'Transfer exceeded - limit set by --max-transfer reached',
+			9: 'Operation successful, but no files transferred (Requires --error-on-no-transfer)',
+			10: 'Duration exceeded - limit set by --max-duration reached',
+		}
+
+	def _get_base_cmd(self) -> list[str]:
+		return [ self.name, 'sync' ]
+
+	def get_cmd(self, bs:BackupSet, dst:str|pathlib.Path, hanoisuf:str, plink:list[str]) -> list[str]:
+		cmd = self._get_base_cmd()
+		cmd.extend(self._get_cmd_srcdst(bs, dst, hanoisuf))
+		cmd.extend(self._get_cmd_options(bs, plink))
+		cmd.append('--use-json-log')
+		return cmd
+
+	def is_error_stdout_line(self, line:bytes, bs:BackupSet) -> str|None:
+		return 'not empty'
+
+	def is_error_stderr_line(self, line:bytes, bs:BackupSet) -> str|None:
+		good_levels = { 'debug', 'info', 'warning' }
+
+		try:
+			decoded = json.loads(line)
+		except json.JSONDecodeError:
+			return 'no json'
+
+		if type(decoded) != dict:
+			return 'no dict'
+
+		if 'level' not in decoded:
+			return 'no level'
+
+		if decoded['level'] not in good_levels:
+			return 'bad level'
+
+		return None
+
+
+# Supported programs
+PROGRAMS = {
+	'rsync': ProgramRsync(),
+	'rclone': ProgramRclone(),
+}
 
 
 class MyLogger:
@@ -151,49 +326,45 @@ class MyLogger:
 class SubProcessCommThread(threading.Thread):
 	""" Base subprocess communication thread class """
 
-	def __init__(self, sp, stream):
+	def __init__(self, name:str, stream:typing.IO[bytes], logh:typing.IO[bytes]|gzip.GzipFile|None, sl:MyLogger, record:bool, bs:BackupSet, check:bool) -> None:
 		"""
-			@param sp: The POpen subproces object
-			@param stream: The sp's stream to read from
+			@param name: The stream name (STDOUT|STDERR)
+			@param stream: The stream to write to
+			@param logh: The file to write to
+			@param sl: Debug logger
+			@param record: Whether to record data in self.output
+			@param bs: The backup set
+			@param check: Whether to check lines for errors
 		"""
-		assert stream == sp.stderr or stream == sp.stdout
-		super(SubProcessCommThread, self).__init__()
-		self.daemon = True
-		self.sp = sp
+		super().__init__(daemon=True)
+		self.name = name
 		self._stream = stream
+		self._logh = logh
+		self._sl = sl
+		self._record = record
+		self._bs = bs
+		self._check = check
+		self.output:list[bytes] = []
+		self.errors:list[tuple[str,bytes]] = []
 
 	def run(self):
 		while True:
 			text = self._stream.readline()
 			if text == b'':
 				break
-			self._processText(text)
+			self._processLine(text)
 
-
-class SubProcessCommStdoutThread(SubProcessCommThread):
-	""" Handles stdout communication with the rsync/tar subprocess """
-
-	def __init__(self, sp, logh):
-		"""
-			@param logh: The logfile handle where to send stdout
-		"""
-		super(SubProcessCommStdoutThread, self).__init__(sp, sp.stdout)
-		self.logh = logh
-
-	def _processText(self, text):
-		self.logh.write(text)
-		self.logh.flush()
-
-
-class SubProcessCommStderrThread(SubProcessCommThread):
-	""" Handles stderr communication with the rsync/tar subprocess """
-
-	def __init__(self, sp):
-		super(SubProcessCommStderrThread, self).__init__(sp, sp.stderr)
-		self.output = b''
-
-	def _processText(self, text):
-		self.output += text
+	def _processLine(self, text:bytes):
+		self._sl.add(self.name + ': ' + text.decode(errors='replace').rstrip('\n'), lvl=1)
+		if self._logh:
+			self._logh.write(text)
+			self._logh.flush()
+		if self._record:
+			self.output.append(text)
+		if self._check:
+			err_reason = self._bs.program.is_error_output_line(self.name, text, self._bs)
+			if err_reason is not None:
+				self.errors.append((err_reason, text))
 
 
 class BackupSet:
@@ -201,7 +372,7 @@ class BackupSet:
 		Backup set class
 	"""
 
-	def __init__(self, name, config):
+	def __init__(self, name, config:jabs_config.JabsConfig):
 		"""
 			Creates a new Backup Set object
 
@@ -209,14 +380,18 @@ class BackupSet:
 			@param object config: the JabsConfig object
 		"""
 		self.name = name
+		# Used to filter backup sets
+		self.run_now = True
 
-		self.program = config.getstr('PROGRAM', self.name, 'rsync')
-		self.backuplist = config.getlist('BACKUPLIST', self.name)
+		self.program = PROGRAMS[config.getstr('PROGRAM', self.name, 'rsync', choices=PROGRAMS.keys())]
+		self.backuplist:list[str|pathlib.Path] = config.getlist('BACKUPLIST', self.name)
 		self.deletelist = config.getlist('DELETELIST', self.name, [])
 		self.ionice = config.getint('IONICE', self.name, 0)
 		self.nice = config.getint('NICE', self.name, 0)
-		self.rsync_opts = config.getlist('RSYNC_OPTS', self.name, [])
-		self.rclone_opts = config.getlist('RCLONE_OPTS', self.name, [])
+		self.program_opts = {
+			'rsync': config.getlist('RSYNC_OPTS', self.name, []),
+			'rclone': config.getlist('RCLONE_OPTS', self.name, []),
+		}
 		self.src = config.getstr('SRC', self.name)
 		self.dst = config.getstr('DST', self.name)
 		self.sleep = config.getint('SLEEP', self.name, 0)
@@ -261,7 +436,7 @@ class Jabs:
 		#TODO: Temporary debug level setting, will use logging instead
 		self.debug = 0
 
-	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str=None, onlySets:list=None, force:bool=False, batch:bool=False, safe:bool=False) -> int:
+	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str|None=None, onlySets:list[str]|None=None, force:bool=False, batch:bool=False, safe:bool=False) -> int:
 		''' Runs JABS
 		@param cfgPath str: Path for the config file
 		@param cacheDir str: Path for the cache directory
@@ -287,25 +462,23 @@ class Jabs:
 			return 1
 
 		# Reads settings from the config file
-		sets = config.sections()
-		if sets.count("Global") < 1:
+		sets_str = config.sections()
+		if sets_str.count("Global") < 1:
 			print("ERROR: Global section on config file not found")
 			return 1
-		sets.remove("Global")
+		sets_str.remove("Global")
 
 		# If specified at command line, remove unwanted sets
 		if onlySets:
-			sets = [s for s in sets if s.lower() in map(lambda i: i.lower(), onlySets)]
+			sets_str = [s for s in sets_str if s.lower() in map(lambda i: i.lower(), onlySets)]
 
 		if self.debug > 0:
-			print("Will run these backup sets:", sets)
+			print("Will run these backup sets:", sets_str)
 
 		#Init backup sets
-		newsets = []
-		for s in sets:
-			newsets.append(BackupSet(s, config))
-		sets = newsets
-		del newsets
+		sets:list[BackupSet] = []
+		for ss in sets_str:
+			sets.append(BackupSet(ss, config))
 
 		#Sort backup sets by priority
 		sets = sorted(sets, key=lambda s: s.pri)
@@ -339,29 +512,21 @@ class Jabs:
 		PIDFILE.flush()
 
 		# Remove disabled sets
-		newsets = []
-		for s in sets:
-			if not s.disabled:
-				newsets.append(s)
-		sets = newsets
-		del newsets
+		sets = [ s for s in sets if not s.disabled ]
 
 		# Check for sets to run based on current time
 		if not force:
-			newsets = []
 			for s in sets:
 				if s.runtime[0] > starttime.time() or s.runtime[1] < starttime.time():
 					if self.debug > 0:
 						print("Skipping set", s.name, "because out of runtime (", s.runtime[0].isoformat(), "-", s.runtime[1].isoformat(), ")")
-				else:
-					newsets.append(s)
-			sets = newsets
-			del newsets
+					s.run_now = False
+		sets = [ s for s in sets if s.run_now ]
 
 		# Check for sets to run based on interval
 		if not force:
-			newsets = []
 			for s in sets:
+				s.run_now = False
 				if s.interval and s.interval > timedelta(seconds=0):
 					# Check if its time to run this set
 					if self.debug > 0:
@@ -388,14 +553,12 @@ class Jabs:
 						if self.debug > 0:
 							print("Skipping set", s.name, "because interval not reached (", str(lastdone+s.interval-starttime), "still remains )")
 					else:
-						newsets.append(s)
-
-			sets = newsets
-			del newsets
+						s.run_now = True
+		sets = [ s for s in sets if s.run_now ]
 
 		# Ping hosts if required
-		newsets = []
 		for s in sets:
+			s.run_now = False
 			if s.ping and s.remsrc:
 				host = s.remsrc.group(1).split('@')[1]
 				if self.debug > 0:
@@ -406,14 +569,12 @@ class Jabs:
 				if hup == 0:
 					if self.debug > -1:
 						print(host, "is UP.")
-					newsets.append(s)
+					s.run_now = True
 				elif self.debug > 0:
 					print("Skipping backup of", host, "because it's down.")
 			else:
-				newsets.append(s)
-
-		sets = newsets
-		del newsets
+				s.run_now = True
+		sets = [ s for s in sets if s.run_now ]
 
 		# Check if some set is still remaining after checks
 		if not len(sets):
@@ -426,23 +587,27 @@ $version
 
 Backup of $hostname
 Backup date: $starttime
-Backup sets:
-$backuplist
+Backup sets: $backupsets
+Backup list: $backuplist
+Program versions:
+$pversions
 -------------------------------------------------
 
 		""")
 
-		nicelist = ""
+		pversions:dict[str,str] = {}
 		for s in sets:
-			nicelist = nicelist + "  " + s.name + "\n"
-		if len(nicelist) > 0:
-			nicelist = nicelist[:-1]
+			if s.program.name not in pversions:
+				pversions[s.program.name] = f'- {s.program.name}: ' + s.program.get_version()
+		pversions_str = '\n'.join(pversions.values())
 
 		backupheader = backupheader_tpl.substitute(
 			version = VERSION,
 			hostname = hostname,
 			starttime = starttime.ctime(),
-			backuplist = nicelist,
+			backupsets = ', '.join(s.name for s in sets),
+			pversions = pversions_str,
+			backuplist = '',
 		)
 		if self.debug > -1:
 			print(backupheader)
@@ -460,8 +625,10 @@ $backuplist
 				version = VERSION,
 				hostname = hostname,
 				starttime = starttime.ctime(),
-				backuplist = s.name,
-			), noprint=True)
+				backupsets = s.name,
+				pversions = pversions_str,
+				backuplist = ', '.join(map(str, s.backuplist)),
+			))
 
 			sl.add("")
 
@@ -479,17 +646,17 @@ $backuplist
 						sl.add("WARNING: Mount of", s.mount, "failed with return code", ret, lvl=-1)
 
 			# Put a file cointaining backup date on dest dir
-			tmpdir = tempfile.mkdtemp()
-			tmpfile = None
+			tmpdir = tempfile.TemporaryDirectory(prefix='jabs_')
+			tmpfile:pathlib.Path|None = None
 			if s.datefile:
 				if safe:
 					sl.add("Skipping creation of datefile", s.datefile)
 				else:
-					tmpfile = tmpdir + "/" + s.datefile
-					sl.add("Generating datefile", tmpfile)
-					TMPFILE = open(tmpfile,"w")
-					TMPFILE.write(str(datetime.now())+"\n")
-					TMPFILE.close()
+					tmpfile = pathlib.Path(tmpdir.name) / s.datefile
+					assert tmpfile is not None
+					sl.add("Generating datefile", str(tmpfile))
+					with open(tmpfile, "wt") as tmpfile_h:
+						tmpfile_h.write(str(datetime.now())+"\n")
 					s.backuplist.append(tmpfile)
 
 			# Calculate curret hanoi day and suffix to use
@@ -507,8 +674,9 @@ $backuplist
 				sl.add("Today is hanoi day", today, "- using suffix:", hanoisuf)
 
 			plink = []
-			if s.hardlink and not s.program == 'rsync':
-				sl.add("Will NOT use hark linking (not supported in {})".format(s.program), stderr, lvl=-1)
+
+			if s.hardlink and not s.program.hardlink_support:
+				sl.add("Will NOT use hark linking (not supported in {})".format(s.program), lvl=-1)
 
 			elif s.hardlink:
 				# Seek for most recent backup set to hard link
@@ -523,14 +691,14 @@ $backuplist
 					sl.add("Subprocess return code:", p.poll())
 					if len(stderr):
 						sl.add("WARNING: stderr was not empty:", stderr, lvl=-1)
-					files = stdout.split('\n')
-					psets = []
-					for f in files:
-						m = rlsparser.match(f)
+					files = stdout.split(b'\n')
+					psets:list[tuple[str,datetime]] = []
+					for file in files:
+						m = rlsparser.match(file.decode())
 						# If file matched regexp and is a directory
 						if m and m.group(1)[0] == "d":
 							btime = datetime.strptime(m.group(6),"%Y-%m-%d %H:%M")
-							psets.append([m.group(7),btime])
+							psets.append((m.group(7),btime))
 				else:
 					(path, base) = os.path.split(s.dst)
 					dirs = os.listdir(path)
@@ -538,13 +706,13 @@ $backuplist
 					for d in dirs:
 						if ( d == base or d[:len(base)] + s.sep == base + s.sep ) and S_ISDIR(os.lstat(path+"/"+d)[ST_MODE]):
 							btime = datetime.fromtimestamp(os.stat(path+"/"+d).st_mtime)
-							psets.append([d,btime])
+							psets.append((d,btime))
 					psets = sorted(psets, key=lambda pset: pset[1], reverse=True) #Sort by age
 
-				for p in psets:
-					sl.add("Found previous backup:", p[0], "(", p[1], ")", lvl=1)
-					if p[0] != base + s.sep + hanoisuf:
-						plink.append(path + "/" + p[0])
+				for pset in psets:
+					sl.add("Found previous backup:", pset[0], "(", pset[1], ")", lvl=1)
+					if pset[0] != base + s.sep + hanoisuf:
+						plink.append(path + "/" + pset[0])
 
 				if len(plink):
 					sl.add("Will hard link against", plink)
@@ -554,17 +722,17 @@ $backuplist
 			else:
 				sl.add("Will NOT use hark linking (disabled)")
 
-			tarlogs = []
+			tarlogs:list[pathlib.Path] = []
 			setsuccess = True
 
 			if s.pre:
 				# Pre-backup tasks
 				goon = False
-				for p in s.pre:
-					sl.add("Running pre-backup task: %s" % p)
-					ret = subprocess.call(p, shell=True)
+				for pre_cmd in s.pre:
+					sl.add("Running pre-backup task: %s" % pre_cmd)
+					ret = subprocess.call(pre_cmd, shell=True)
 					if ret != 0:
-						sl.add("ERROR: %s failed with return code %i" % (p, ret), lvl=-2)
+						sl.add("ERROR: %s failed with return code %i" % (pre_cmd, ret), lvl=-2)
 						setsuccess=False
 						if s.skiponpreerror:
 							sl.add("ERROR: Skipping", s.name, "set, SKIPONPREERROR is set.", lvl=-2)
@@ -585,38 +753,18 @@ $backuplist
 					sl.add("WARNING: Skipping", s.name, "set, read error on", s.dst, ".", lvl=-1)
 					continue
 
-			for d in s.backuplist:
-				sl.add("Backing up", d, "on", s.name, "...")
+			for bel in s.backuplist:
+				sl.add("Backing up", str(bel), "on", s.name, "...")
 				tarlogfile = None
 				if s.mailto:
-					tarlogfile = tmpdir + '/' + re.sub(r'(\/|\.)', '_', s.name + '-' + d) + '.log'
+					tarlogfile_ext = '.log'
 					if s.compresslog:
-						tarlogfile += '.gz'
-				if not safe:
+						tarlogfile_ext += '.gz'
+					tarlogfile = pathlib.Path(tmpdir.name) / (re.sub(r'(\/|\.)', '_', s.name + '-' + str(bel)) + tarlogfile_ext)
 					tarlogs.append(tarlogfile)
 
 				#Build command line
-				cmd, cmdi, cmdn, cmdr = ([] for x in range(4))
-				cmdi.extend(["ionice", "-c", str(s.ionice)])
-				cmdn.extend(["nice", "-n", str(s.nice)])
-				if s.program not in ('rsync', 'rclone'):
-					raise RuntimeError('Unsupported program {}'.format(s.program))
-				opts = s.rsync_opts if s.program == 'rsync' else s.rclone_opts
-				cmdr.append(s.program)
-				cmdr.extend(map(lambda x: rpat.sub(s.name.lower(),x), opts))
-				for pl in plink:
-					cmdr.append("--link-dest=" + pl )
-				if tmpfile and d == tmpfile:
-					cmdr.append(tmpfile)
-				else:
-					cmdr.append(rdir.sub(d, s.src))
-				cmdr.append(rdir.sub(d, s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") ))
-
-				if s.ionice != 0:
-					cmd.extend(cmdi)
-				if s.nice != 0:
-					cmd.extend(cmdn)
-				cmd.extend(cmdr)
+				cmd = s.program.get_cmd(s, bel, hanoisuf, plink)
 
 				if safe:
 					nlvl = 0
@@ -624,14 +772,14 @@ $backuplist
 					nlvl = 1
 				sl.add("Commandline:", cmd, lvl=nlvl)
 				if tarlogfile:
-					sl.add("Will write STDOUT and STDERR to", tarlogfile, lvl=1)
+					sl.add("Will write STDOUT and STDERR to", str(tarlogfile), lvl=1)
 
 				if not safe:
 					# Execute the backup
 					sys.stdout.flush()
 
 					if not tarlogfile:
-						tarlogfile_handle = None
+						tarlogfile_handle:typing.IO[bytes]|gzip.GzipFile|None = None
 					elif s.compresslog:
 						tarlogfile_handle = gzip.open(tarlogfile, 'wb')
 					else:
@@ -644,64 +792,79 @@ $backuplist
 						print("Path: ", os.environ['PATH'])
 						return 1
 
-					if tarlogfile_handle:
-						spoct = SubProcessCommStdoutThread(p, tarlogfile_handle)
-					spect = SubProcessCommStderrThread(p)
+					if psutil is None:
+						sl.add("WARNING: psutil library not installed while trying to set niceness", lvl=-1)
+					else:
+						try:
+							ps_p = psutil.Process(p.pid)
 
-					if tarlogfile_handle:
-						spoct.start()
+							if s.nice != 0:
+								sl.add("Setting process niceness to", str(s.nice), lvl=1)
+								ps_p.nice(s.nice)
+
+							if s.ionice != 0:
+								sl.add("Setting process i/o class to", str(s.ionice), lvl=1)
+								ps_p.ionice(s.ionice)
+						except psutil.NoSuchProcess:
+							sl.add("WARNING: process not found while trying to set niceness", lvl=-1)
+
+					if p.stdout is None or p.stderr is None:
+						raise RuntimeError("Unable to open streams")
+					elif isinstance(s.program, ProgramRsync):
+						# Rsync writes error to stderr and normal/operational info to stderr
+						spoct = SubProcessCommThread('STDOUT', p.stdout, tarlogfile_handle, sl, False, s, False)
+						spect = SubProcessCommThread('STDERR', p.stderr, None, sl, True, s, True)
+					elif isinstance(s.program, ProgramRclone):
+						# Rclone writes all output to stderr, in JSON
+						spoct = SubProcessCommThread('STDOUT', p.stdout, None, sl, True, s, False)
+						spect = SubProcessCommThread('STDERR', p.stderr, tarlogfile_handle, sl, False, s, True)
+					else:
+						raise NotImplementedError(s.program.__class__.__name__)
+
+					spoct.start()
 					spect.start()
 
 					ret = p.wait()
 
-					if tarlogfile_handle:
-						spoct.join()
+					spoct.join()
 					spect.join()
 
 					if tarlogfile_handle:
 						tarlogfile_handle.close()
 
-					goodrets = { 0 }
-					if s.ignorevanished:
-						goodrets.add(24)
+					goodrets = s.program.get_good_exit_codes(s)
 
 					if ret in goodrets:
 						retmessage = 'Good'
 					else:
 						retmessage = 'Bad'
 						setsuccess = False
-					retdescr = f"({RSYNC_EXIT_CODES[ret]})" if ret in RSYNC_EXIT_CODES else ''
+					retdescr = s.program.get_exit_code_descr(ret)
 					sl.add(f"Done. {retmessage} exit status:", ret, retdescr)
 
-					# Analyze STDERR
-					vanish_starts = [
-						b'file has vanished: ',
-						b'rsync warning: some files vanished before they could be transferred',
-					]
-
-					if len(spect.output):
-						badoutput = False
+					# Error if had bad output
+					for spct in spoct, spect:
 						quotedstderrlines = []
 
-						for line in spect.output.splitlines():
-							badline = True
+						for reason, line in spct.errors:
+							quotedstderrlines.append(reason + '!> ' + line.decode('utf-8', errors='replace').rstrip('\n'))
 
-							if b'(will try again)' in line:
-								badline = False
-							elif s.ignorevanished and any([line.startswith(s) for s in vanish_starts]):
-								badline = False
+						if not quotedstderrlines:
+							continue
 
-							badoutput = badoutput or badline
-							quotedstderrlines.append('!' if badline else '-' + '> ' + spect.output.decode('utf-8', errors='replace').rstrip('\n'))
-
-						if badoutput:
-							setsuccess = False
-							sl.add("ERROR: stderr was not empty:")
-						else:
-							sl.add("WARNING: stderr was not empty (but no errors detected):")
-
+						setsuccess = False
+						sl.add("ERROR: " + spct.name + " had errors:")
 						for ql in quotedstderrlines:
 							sl.add(ql)
+
+					# Show full recorded output anyway
+					for spct in spoct, spect:
+						if not spct.output:
+							continue
+
+						sl.add("INFO: full " + spct.name + ":")
+						for line in spct.output:
+							sl.add(line.decode('utf-8', errors='replace').rstrip('\n'))
 
 				if s.sleep > 0:
 					if safe:
@@ -752,7 +915,11 @@ $backuplist
 					sl.add("WARNING: Can't create symlink", s.dst, "a file with such name exists", lvl=-1)
 
 			stooktime = datetime.now() - sstarttime
-			sl.add("Set", s.name, "completed. Took:", stooktime)
+			if setsuccess:
+				how = "succesfully"
+			else:
+				how = "with errors"
+			sl.add(f"Set {s.name} completed {how}. Took: {stooktime}")
 
 			# Umount
 			if s.umount:
@@ -780,11 +947,17 @@ $backuplist
 
 					# Create main message
 					msg = MIMEMultipart()
+					msg["Message-ID"] = email.utils.make_msgid()
+					msg["X-Jabs-Version"] = consts.version_str()
+					msg["X-Jabs-Host"] = hostname
+					msg["Date"] = email.utils.formatdate(localtime=True)
 					if setsuccess:
 						i = "OK"
 					else:
 						i = "FAILED"
 					msg['Subject'] = "Backup of " + s.name + " " + i
+					msg["X-Jabs-SetSuccess"] = str(setsuccess).lower()
+					msg["X-Jabs-SetName"] = s.name
 					if s.mailfrom:
 						m_from = s.mailfrom
 					else:
@@ -800,25 +973,26 @@ $backuplist
 
 					# Add attachments
 					for tl in tarlogs:
-						if tl:
-							TL = open(tl, 'rb')
+						if not tl.exists():
+							continue
+
+						with open(tl, 'rb') as f:
 							if s.compresslog:
-								att = MIMEApplication(TL.read(),'gzip')
+								att:MIMEApplication|MIMEText = MIMEApplication(f.read(),'gzip')
 							else:
-								att = MIMEText(TL.read(),'plain','utf-8')
-							TL.close()
-							att.add_header(
-								'Content-Disposition',
-								'attachment',
-								filename=os.path.basename(tl)
-							)
-							msg.attach(att)
+								att = MIMEText(f.read().decode(errors='replace'),'plain','utf-8')
+						att.add_header(
+							'Content-Disposition',
+							'attachment',
+							filename=os.path.basename(tl)
+						)
+						msg.attach(att)
 
 					# Send the message
 					if s.smtphost:
 						smtp_port = 0 if s.smtpport is None else s.smtpport
 						if s.smtpssl:
-							smtp = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
+							smtp:smtplib.SMTP_SSL|smtplib.SMTP = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
 						else:
 							smtp = smtplib.SMTP(s.smtphost, smtp_port, timeout=s.smtptimeout)
 					else:
@@ -832,17 +1006,17 @@ $backuplist
 
 			# Delete temporary logs, if any
 			for tl in tarlogs:
-				if tl:
-					sl.add("Deleting log file", tl, lvl=1)
-					os.unlink(tl)
-			tarlogs = []
+				if tl.exists():
+					sl.add("Deleting log file", str(tl), lvl=1)
+					tl.unlink()
+			tarlogs.clear()
 
 			# Delete tmpfile, if created
-			if tmpfile and len(tmpfile):
+			if tmpfile and tmpfile.exists():
 				sl.add("Deleting temporary files")
-				os.unlink(tmpfile)
+				tmpfile.unlink()
 			if tmpdir:
-				os.rmdir(tmpdir)
+				tmpdir.cleanup()
 
 		took = datetime.now() - starttime
 		if self.debug > -1:

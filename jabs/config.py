@@ -122,9 +122,12 @@ class JabsConfig(configparser.ConfigParser):
 				else:
 					raise ValueError("Error parsing config file: option %s not found." % name)
 
-	def getstr(self, name, section=NotImplemented, default=NotImplemented, multi=False):
+	def getstr(self, name, section=NotImplemented, default=NotImplemented, multi=False, choices=None) -> str:
 		""" Same as __get, returning a string """
-		return self.__get(name, section, default, 'str', multi)
+		val = self.__get(name, section, default, 'str', multi)
+		if choices is not None and val not in choices:
+			raise ValueError(f"Error parsing config file: option {name} must be one of {choices}.")
+		return val
 
 	def getint(self, name, section=NotImplemented, default=NotImplemented, multi=False):
 		""" Same as __get, but also formats value as int """
@@ -144,15 +147,15 @@ class JabsConfig(configparser.ConfigParser):
 		""" Same as __get, but also formats value as boolean """
 		return self.__get(name, section, default, 'bool', multi)
 
-	def getdate(self, name, section=NotImplemented, default=NotImplemented, multi=False):
+	def getdate(self, name, section=NotImplemented, default=NotImplemented, multi=False) -> datetime.date:
 		""" Same as __get, but returns a date from the format YYYY-MM-DD """
 		return self.__get(name, section, default, 'date', multi)
 
-	def getinterval(self, name, section=NotImplemented, default=NotImplemented, multi=False):
+	def getinterval(self, name, section=NotImplemented, default=NotImplemented, multi=False) -> datetime.timedelta:
 		""" Same as __get, but returns a timedelta from a string interval """
 		return self.__get(name, section, default, 'interval', multi)
 
-	def gettimerange(self, name, section=NotImplemented, default=NotImplemented, multi=False):
+	def gettimerange(self, name, section=NotImplemented, default=NotImplemented, multi=False) -> tuple[datetime.time,datetime.time]:
 		"""
 			Same as __get, but returns a list with two time objects representing
 			a time range form a string in the format hh:mm:ss-hh:mm:ss
