@@ -227,9 +227,11 @@ class Main:
 		self.config = configparser.ConfigParser(defaults=CONFIG_DEFAULTS)
 		self.config.read(configPath)
 
-	def run(self, forceLink=False):
+	def run(self, forceLink=False) -> bool:
 		''' Runs the snapshotter '''
 		dateRe = re.compile(r'^([0-9]{4})-([0-9]{2})-([0-9]{2})$')
+
+		all_success = True
 
 		# Checks sets and snapshots them
 		for section in self.config:
@@ -251,7 +253,14 @@ class Main:
 			if sets < 1:
 				raise ValueError('Invalid hanoi sets number')
 
-			Snapshotter(section, root, cur, hanoiDay, sets, linkLast, linkLastName).run(forceLink)
+			sn = Snapshotter(section, root, cur, hanoiDay, sets, linkLast, linkLastName)
+			try:
+				sn.run(forceLink)
+			except Exception as e:
+				self._log.error('Error running snapshotter for set %s: %s', section, e)
+				all_success = False
+
+		return all_success
 
 
 def runFromCommandLine() -> int:
@@ -277,13 +286,13 @@ def runFromCommandLine() -> int:
 	logging.basicConfig(level=level, format=format)
 
 	try:
-		Main(args.configFile).run(forceLink=args.linklast)
+		all_success = Main(args.configFile).run(forceLink=args.linklast)
 	except Exception as e:
 		logging.critical(traceback.format_exc())
 		print('ERROR: {}'.format(e))
 		return 1
 
-	return 0
+	return 0 if all_success else 2
 
 
 if __name__ == '__main__':
