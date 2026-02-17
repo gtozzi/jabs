@@ -387,6 +387,7 @@ class BackupSet:
 		self.backuplist:list[str|pathlib.Path] = config.getlist('BACKUPLIST', self.name)
 		self.deletelist = config.getlist('DELETELIST', self.name, [])
 		self.ionice = config.getint('IONICE', self.name, 0)
+		self.ionice_level = config.getint('IONICE_LEVEL', self.name, None)
 		self.nice = config.getint('NICE', self.name, 0)
 		self.program_opts = {
 			'rsync': config.getlist('RSYNC_OPTS', self.name, []),
@@ -803,8 +804,8 @@ $pversions
 								ps_p.nice(s.nice)
 
 							if s.ionice != 0:
-								sl.add("Setting process i/o class to", str(s.ionice), lvl=1)
-								ps_p.ionice(s.ionice)
+								sl.add("Setting process i/o class to", str(s.ionice), 'level', s.ionice_level, lvl=1)
+								ps_p.ionice(s.ionice, s.ionice_level)
 						except psutil.NoSuchProcess:
 							sl.add("WARNING: process not found while trying to set niceness", lvl=-1)
 
