@@ -47,13 +47,15 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 from __future__ import annotations
 
 import abc
+import concurrent.futures
+import itertools
 import types
 import typing
 import os, sys, socket, subprocess, threading, gzip, tempfile, getpass, shutil
 from stat import S_ISDIR, S_ISLNK, ST_MODE
 psutil:types.ModuleType|None = None
 try:
-	import psutil
+	import psutil  # type: ignore[no-redef]
 except ModuleNotFoundError:
 	pass
 import json
@@ -80,6 +82,15 @@ CACHEDIR = "/var/cache/jabs"
 # Useful regexp
 risremote = re.compile(r'(.*@.*):{1,2}(.*)')
 rlsparser = re.compile(r'^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2})\s+(.+)$')
+
+# Lock ensuring parallel threads do not interleave their console output
+_print_lock = threading.Lock()
+
+# ANSI colour cycle used for per-set prefixes in parallel mode (Docker-style)
+_ANSI_COLORS = ['\033[36m', '\033[33m', '\033[32m', '\033[35m', '\033[34m', '\033[31m']
+_ANSI_RESET = '\033[0m'
+
+
 
 # ------------ FUNCTIONS AND CLASSES ----------------------
 
@@ -282,11 +293,17 @@ class MyLogger:
 		1: SUPERFLUOUS message
 		2: DEBUG message
 	"""
-	def __init__(self):
+	def __init__(self, prefix:str=''):
+		'''
+			@param prefix str: Optional string prepended to every printed line.
+			    Used in parallel mode to identify the owning set. Never included
+			    in the buffered log (so email output is always clean).
+		'''
 		#List of lists: 0: the string, 1=debug level
-		self.logs = []
+		self.logs:list[list] = []
 		#With print only messages with this debug level or lower
 		self.debuglvl = 0
+		self._prefix = prefix
 
 	def setdebuglvl(self, lvl):
 		self.debuglvl = lvl
@@ -311,11 +328,26 @@ class MyLogger:
 		if len(outstr):
 			outstr = outstr[:-1]
 		if lvl <= self.debuglvl and not ( 'noprint' in kwargs and kwargs['noprint'] ):
-			print(outstr)
+			with _print_lock:
+				print(self._prefix + outstr)
 		self.logs.append([outstr, lvl])
 
+	@staticmethod
+	def color_prefixes(sets:list) -> dict:
+		'''
+			Assigns a distinct coloured, padded name prefix to every set.
+			Used in parallel mode so each line is clearly attributable to its set.
+			@param sets list[BackupSet]: the active backup sets
+			@return dict mapping set name to its ready-to-print prefix string
+		'''
+		max_len = max(len(s.name) for s in sets)
+		return {
+			s.name: f'{_ANSI_COLORS[i % len(_ANSI_COLORS)]}{s.name.ljust(max_len)}{_ANSI_RESET} | '
+			for i, s in enumerate(sets)
+		}
+
 	def getstr(self,lvl=0):
-		""" Returns the buffered log as string """
+		""" Returns the buffered log as string (never includes the line prefix) """
 		retstr = ''
 		for l in self.logs:
 			if l[1] <= lvl:
@@ -369,7 +401,13 @@ class SubProcessCommThread(threading.Thread):
 
 class BackupSet:
 	"""
-		Backup set class
+		Backup set class.
+		The PRI setting serves a dual purpose: in sequential mode it controls
+		execution order; in parallel mode (-p) sets sharing the same PRI value
+		run concurrently, and each distinct PRI value forms a sequential stage
+		(lower PRI stages complete before higher ones begin).
+		NOTE: concurrent sets sharing a mount/umount point will race -- this is
+		a configuration responsibility, not enforced by the code.
 	"""
 
 	def __init__(self, name, config:jabs_config.JabsConfig):
@@ -437,16 +475,429 @@ class Jabs:
 		#TODO: Temporary debug level setting, will use logging instead
 		self.debug = 0
 
-	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str|None=None, onlySets:list[str]|None=None, force:bool=False, batch:bool=False, safe:bool=False) -> int:
-		''' Runs JABS
-		@param cfgPath str: Path for the config file
-		@param cacheDir str: Path for the cache directory
-		@param pidFilePath str: Path of PID file (overrides config if given)
-		@param onlySets list: List of sets to run
-		@param force bool: When True will ignore time constraints and always run sets at any time
-		@param batch bool: When true enables batch mode: exit silently if script is already running
-		@param safe bool: When True enables safe mode: just print what will do, don't change anything
-		@return int exit status, 0 on success
+	def _run_set(self, s:BackupSet, cacheDir:str, safe:bool, starttime:datetime,
+				backupheader_tpl:Template, pversions_str:str,
+				hostname:str, username:str, prefix:str='') -> None:
+		'''
+			Executes a single backup set. Designed to be called from a thread.
+			@param s BackupSet: the set to run
+			@param cacheDir str: path to the cache directory
+			@param safe bool: when True only prints what would be done
+			@param starttime datetime: overall job start time (shared, read-only)
+			@param backupheader_tpl Template: header template (shared, read-only)
+			@param pversions_str str: pre-built program versions string (shared, read-only)
+			@param hostname str: local hostname (shared, read-only)
+			@param username str: running user (shared, read-only)
+			@param prefix str: coloured line prefix for parallel output (empty in sequential mode)
+		'''
+		sstarttime = datetime.now()
+
+		# Write some log data in a string, to be eventually mailed later
+		sl = MyLogger(prefix)
+		sl.setdebuglvl(self.debug)
+		sl.add(backupheader_tpl.substitute(
+			version = VERSION,
+			hostname = hostname,
+			starttime = starttime.ctime(),
+			backupsets = s.name,
+			pversions = pversions_str,
+			backuplist = ', '.join(map(str, s.backuplist)),
+		))
+
+		sl.add("")
+
+		if s.mount:
+			if os.path.ismount(s.mount):
+				sl.add("WARNING: Skipping mount of", s.mount, "because it's already mounted", lvl=-1)
+			else:
+				# Mount specified location
+				cmd = ["mount", s.mount ]
+				sl.add("Mounting", s.mount)
+				p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+				stdout, stderr = p.communicate()
+				ret = p.poll()
+				if ret != 0:
+					sl.add("WARNING: Mount of", s.mount, "failed with return code", ret, lvl=-1)
+
+		# Calculate current hanoi day and suffix to use
+		hanoisuf = ""
+		if s.hanoi > 0:
+			today = (starttime.date() - s.hanoiday).days + 1
+			i = s.hanoi
+			while i >= 0:
+				if today % 2 ** i == 0:
+					hanoisuf = chr(i+65)
+					break
+				i -= 1
+			sl.add("First hanoi day:", s.hanoiday, lvl=1)
+			sl.add("Hanoi sets to use:", s.hanoi)
+			sl.add("Today is hanoi day", today, "- using suffix:", hanoisuf)
+
+		plink = []
+
+		if s.hardlink and not s.program.hardlink_support:
+			sl.add("Will NOT use hark linking (not supported in {})".format(s.program), lvl=-1)
+
+		elif s.hardlink:
+			# Seek for most recent backup set to hard link
+			if s.remdst:
+				#Backing up to a remote path
+				(path, base) = os.path.split(s.remdst.group(2))
+				sl.add("Backing up to remote path:", s.remdst.group(1), s.remdst.group(2), lvl=1)
+				cmd = ["ssh", "-o", "BatchMode=true", s.remdst.group(1), "ls -l --color=never --time-style=long-iso -t -1 \"" + path + "\"" ]
+				sl.add("Issuing remote command:", cmd)
+				p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+				stdout, stderr = p.communicate()
+				sl.add("Subprocess return code:", p.poll())
+				if len(stderr):
+					sl.add("WARNING: stderr was not empty:", stderr, lvl=-1)
+				files = stdout.split(b'\n')
+				psets:list[tuple[str,datetime]] = []
+				for file in files:
+					m = rlsparser.match(file.decode())
+					# If file matched regexp and is a directory
+					if m and m.group(1)[0] == "d":
+						btime = datetime.strptime(m.group(6),"%Y-%m-%d %H:%M")
+						psets.append((m.group(7),btime))
+			else:
+				(path, base) = os.path.split(s.dst)
+				dirs = os.listdir(path)
+				psets = []
+				for d in dirs:
+					if ( d == base or d[:len(base)] + s.sep == base + s.sep ) and S_ISDIR(os.lstat(path+"/"+d)[ST_MODE]):
+						btime = datetime.fromtimestamp(os.stat(path+"/"+d).st_mtime)
+						psets.append((d,btime))
+				psets = sorted(psets, key=lambda pset: pset[1], reverse=True) #Sort by age
+
+			for pset in psets:
+				sl.add("Found previous backup:", pset[0], "(", pset[1], ")", lvl=1)
+				if pset[0] != base + s.sep + hanoisuf:
+					plink.append(path + "/" + pset[0])
+
+			if len(plink):
+				sl.add("Will hard link against", plink)
+			else:
+				sl.add("Will NOT use hard linking (no suitable set found)")
+
+		else:
+			sl.add("Will NOT use hark linking (disabled)")
+
+		tarlogs:list[pathlib.Path] = []
+		setsuccess = True
+
+		if s.pre:
+			# Pre-backup tasks
+			goon = False
+			for pre_cmd in s.pre:
+				sl.add("Running pre-backup task: %s" % pre_cmd)
+				ret = subprocess.call(pre_cmd, shell=True)
+				if ret != 0:
+					sl.add("ERROR: %s failed with return code %i" % (pre_cmd, ret), lvl=-2)
+					setsuccess=False
+					if s.skiponpreerror:
+						sl.add("ERROR: Skipping", s.name, "set, SKIPONPREERROR is set.", lvl=-2)
+						break
+			else:
+				goon = True
+			if not goon:
+				return
+
+		if s.checkdst:
+			# Checks whether the given backup destination exists
+			try:
+				i = os.path.exists(s.dst)
+				if not i:
+					sl.add("WARNING: Skipping", s.name, "set, destination", s.dst, "not found.", lvl=-1)
+					return
+			except:
+				sl.add("WARNING: Skipping", s.name, "set, read error on", s.dst, ".", lvl=-1)
+				return
+
+		# Put a file containing backup date on dest dir
+		tmpdir = tempfile.TemporaryDirectory(prefix=f'job_{os.getpid()}_', dir=cacheDir)
+		tmpfile:pathlib.Path|None = None
+		try:
+			if s.datefile:
+				if safe:
+					sl.add("Skipping creation of datefile", s.datefile)
+				else:
+					tmpfile = pathlib.Path(tmpdir.name) / s.datefile
+					assert tmpfile is not None
+					sl.add("Generating datefile", str(tmpfile))
+					with open(tmpfile, "wt") as tmpfile_h:
+						tmpfile_h.write(str(datetime.now())+"\n")
+					s.backuplist.append(tmpfile)
+
+			for bel in s.backuplist:
+				sl.add("Backing up", str(bel), "on", s.name, "...")
+				tarlogfile = None
+				if s.mailto:
+					tarlogfile_ext = '.log'
+					if s.compresslog:
+						tarlogfile_ext += '.gz'
+					tarlogfile = pathlib.Path(tmpdir.name) / (re.sub(r'(\/|\.)', '_', s.name + '-' + str(bel)) + tarlogfile_ext)
+					tarlogs.append(tarlogfile)
+
+				#Build command line
+				cmd = s.program.get_cmd(s, bel, hanoisuf, plink)
+
+				if safe:
+					nlvl = 0
+				else:
+					nlvl = 1
+				sl.add("Commandline:", cmd, lvl=nlvl)
+				if tarlogfile:
+					sl.add("Will write STDOUT and STDERR to", str(tarlogfile), lvl=1)
+
+				if not safe:
+					# Execute the backup
+					sys.stdout.flush()
+
+					if not tarlogfile:
+						tarlogfile_handle:typing.IO[bytes]|gzip.GzipFile|None = None
+					elif s.compresslog:
+						tarlogfile_handle = gzip.open(tarlogfile, 'wb')
+					else:
+						tarlogfile_handle = open(tarlogfile, 'wb')
+
+					try:
+						p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
+					except OSError as e:
+						raise RuntimeError(f"Unable to locate executable {e.filename!r} (PATH={os.environ['PATH']})")
+
+					if psutil is None:
+						sl.add("WARNING: psutil library not installed while trying to set niceness", lvl=-1)
+					else:
+						try:
+							ps_p = psutil.Process(p.pid)
+
+							if s.nice != 0:
+								sl.add("Setting process niceness to", str(s.nice), lvl=1)
+								ps_p.nice(s.nice)
+
+							if s.ionice != 0:
+								sl.add("Setting process i/o class to", str(s.ionice), 'level', s.ionice_level, lvl=1)
+								ps_p.ionice(s.ionice, s.ionice_level)
+						except psutil.NoSuchProcess:
+							sl.add("WARNING: process not found while trying to set niceness", lvl=-1)
+
+					if p.stdout is None or p.stderr is None:
+						raise RuntimeError("Unable to open streams")
+					elif isinstance(s.program, ProgramRsync):
+						# Rsync writes error to stderr and normal/operational info to stderr
+						spoct = SubProcessCommThread('STDOUT', p.stdout, tarlogfile_handle, sl, False, s, False)
+						spect = SubProcessCommThread('STDERR', p.stderr, None, sl, True, s, True)
+					elif isinstance(s.program, ProgramRclone):
+						# Rclone writes all output to stderr, in JSON
+						spoct = SubProcessCommThread('STDOUT', p.stdout, None, sl, True, s, False)
+						spect = SubProcessCommThread('STDERR', p.stderr, tarlogfile_handle, sl, False, s, True)
+					else:
+						raise NotImplementedError(s.program.__class__.__name__)
+
+					spoct.start()
+					spect.start()
+
+					ret = p.wait()
+
+					spoct.join()
+					spect.join()
+
+					if tarlogfile_handle:
+						tarlogfile_handle.close()
+
+					goodrets = s.program.get_good_exit_codes(s)
+
+					if ret in goodrets:
+						retmessage = 'Good'
+					else:
+						retmessage = 'Bad'
+						setsuccess = False
+					retdescr = s.program.get_exit_code_descr(ret)
+					sl.add(f"Done. {retmessage} exit status:", ret, retdescr)
+
+					# Error if had bad output
+					for spct in spoct, spect:
+						quotedstderrlines = []
+
+						for reason, line in spct.errors:
+							quotedstderrlines.append(reason + '!> ' + line.decode('utf-8', errors='replace').rstrip('\n'))
+
+						if not quotedstderrlines:
+							continue
+
+						setsuccess = False
+						sl.add("ERROR: " + spct.name + " had errors:")
+						for ql in quotedstderrlines:
+							sl.add(ql)
+
+					# Show full recorded output anyway
+					for spct in spoct, spect:
+						if not spct.output:
+							continue
+
+						sl.add("INFO: full " + spct.name + ":")
+						for line in spct.output:
+							sl.add(line.decode('utf-8', errors='replace').rstrip('\n'))
+
+				if s.sleep > 0:
+					if safe:
+						sl.add("Should sleep", s.sleep, "secs now, skipping.")
+					else:
+						sl.add("Sleeping", s.sleep, "secs.")
+						sleep(s.sleep)
+
+			# Delete dirs from deletelist
+			for d in s.deletelist:
+				deldest = s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") + os.sep + d
+				if os.path.exists(deldest) and os.path.isdir(deldest):
+					sl.add('DELETING folder in deletelist %s' % deldest)
+					shutil.rmtree(deldest)
+
+			# Save last backup execution time
+			if s.interval and s.interval > timedelta(seconds=0):
+				if safe:
+					sl.add("Skipping write of last backup timestamp")
+				else:
+					sl.add("Writing last backup timestamp", lvl=1)
+					cachefile = cacheDir + os.sep + s.name
+					CACHEFILE = open(cachefile,'w')
+					CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
+					CACHEFILE.close()
+
+			# Create backup symlink, is using hanoi and not remote
+			if len(hanoisuf)>0 and not s.remdst:
+				if os.path.exists(s.dst) and S_ISLNK(os.lstat(s.dst)[ST_MODE]):
+					if safe:
+						sl.add("Skipping deletion of old symlink", s.dst)
+					else:
+						sl.add("Deleting old symlink", s.dst)
+						os.unlink(s.dst)
+				if not os.path.exists(s.dst):
+					if safe:
+						sl.add("Skipping creation of symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
+					else:
+						sl.add("Creating symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
+						os.symlink(s.dst+s.sep+hanoisuf, s.dst)
+				elif not safe:
+					sl.add("WARNING: Can't create symlink", s.dst, "a file with such name exists", lvl=-1)
+
+			stooktime = datetime.now() - sstarttime
+			if setsuccess:
+				how = "succesfully"
+			else:
+				how = "with errors"
+			sl.add(f"Set {s.name} completed {how}. Took: {stooktime}")
+
+			# Umount
+			if s.umount:
+				if not os.path.ismount(s.umount):
+					sl.add("WARNING: Skipping umount of", s.umount, "because it's not mounted", lvl=-1)
+				else:
+					# Umount specified location
+					cmd = ["umount", s.umount ]
+					sl.add("Umounting", s.umount)
+					p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+					stdout, stderr = p.communicate()
+					ret = p.poll()
+					if ret != 0:
+						sl.add("WARNING: Umount of", s.umount, "failed with return code", ret, lvl=-1)
+
+			# Send email
+			if s.mailto:
+				if safe:
+					sl.add("Skipping sending detailed logs to", s.mailto)
+				else:
+					if s.smtphost:
+						sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost, "port", s.smtpport, "ssl", s.smtpssl)
+					else:
+						sl.add("Sending detailed logs to", s.mailto, "using local smtp")
+
+					# Create main message
+					msg = MIMEMultipart()
+					msg["Message-ID"] = email.utils.make_msgid()
+					msg["X-Jabs-Version"] = consts.version_str()
+					msg["X-Jabs-Host"] = hostname
+					msg["Date"] = email.utils.formatdate(localtime=True)
+					if setsuccess:
+						i = "OK"
+					else:
+						i = "FAILED"
+					msg['Subject'] = "Backup of " + s.name + " " + i
+					msg["X-Jabs-SetSuccess"] = str(setsuccess).lower()
+					msg["X-Jabs-SetName"] = s.name
+					if s.mailfrom:
+						m_from = s.mailfrom
+					else:
+						m_from = username + "@" + hostname
+					msg['From'] = m_from
+					msg['To'] = ', '.join(s.mailto)
+					msg.preamble = 'This is a milti-part message in MIME format.'
+
+					# Add base text
+					txt = sl.getstr() + "\n\nDetailed logs are attached.\n"
+					txt = MIMEText(txt)
+					msg.attach(txt)
+
+					# Add attachments
+					for tl in tarlogs:
+						if not tl.exists():
+							continue
+
+						with open(tl, 'rb') as f:
+							if s.compresslog:
+								att:MIMEApplication|MIMEText = MIMEApplication(f.read(),'gzip')
+							else:
+								att = MIMEText(f.read().decode(errors='replace'),'plain','utf-8')
+						att.add_header(
+							'Content-Disposition',
+							'attachment',
+							filename=os.path.basename(tl)
+						)
+						msg.attach(att)
+
+					# Send the message
+					if s.smtphost:
+						smtp_port = 0 if s.smtpport is None else s.smtpport
+						if s.smtpssl:
+							smtp:smtplib.SMTP_SSL|smtplib.SMTP = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
+						else:
+							smtp = smtplib.SMTP(s.smtphost, smtp_port, timeout=s.smtptimeout)
+					else:
+						smtp = smtplib.SMTP(timeout=s.smtptimeout)
+						smtp.connect()
+					#smtp.set_debuglevel(1)
+					if s.smtpuser or s.smtppass:
+						smtp.login(s.smtpuser, s.smtppass)
+					smtp.sendmail(m_from, s.mailto, msg.as_string())
+					smtp.quit()
+
+			# Delete temporary logs, if any
+			for tl in tarlogs:
+				if tl.exists():
+					sl.add("Deleting log file", str(tl), lvl=1)
+					tl.unlink()
+			tarlogs.clear()
+
+			# Delete tmpfile, if created
+			if tmpfile and tmpfile.exists():
+				sl.add("Deleting temporary files")
+				tmpfile.unlink()
+
+		finally:
+			tmpdir.cleanup()
+
+	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str|None=None, onlySets:list[str]|None=None, force:bool=False, batch:bool=False, safe:bool=False, parallel:bool=False) -> int:
+		'''
+			Runs JABS.
+			@param cfgPath str: Path for the config file
+			@param cacheDir str: Path for the cache directory
+			@param pidFilePath str: Path of PID file (overrides config if given)
+			@param onlySets list: List of sets to run
+			@param force bool: When True will ignore time constraints and always run sets at any time
+			@param batch bool: When true enables batch mode: exit silently if script is already running
+			@param safe bool: When True enables safe mode: just print what will do, don't change anything
+			@param parallel bool: When True runs independent sets concurrently (grouped by PRI)
+			@return int exit status, 0 on success
 		'''
 		# Init some useful variables
 		hostname = socket.getfqdn()
@@ -582,7 +1033,7 @@ class Jabs:
 		os.makedirs(cacheDir, 0o700, exist_ok=True)
 
 		# Print the backup header
-		backupheader_tpl = Template("""
+		backupheader_tpl = Template('''
 -------------------------------------------------
 $version
 
@@ -594,7 +1045,7 @@ Program versions:
 $pversions
 -------------------------------------------------
 
-		""")
+		''')
 
 		pversions:dict[str,str] = {}
 		for s in sets:
@@ -615,406 +1066,32 @@ $pversions
 
 		# ---------------- DO THE BACKUP ---------------------------
 
-		for s in sets:
-
-			sstarttime = datetime.now()
-
-			# Write some log data in a string, to be eventually mailed later
-			sl = MyLogger()
-			sl.setdebuglvl(self.debug)
-			sl.add(backupheader_tpl.substitute(
-				version = VERSION,
-				hostname = hostname,
-				starttime = starttime.ctime(),
-				backupsets = s.name,
-				pversions = pversions_str,
-				backuplist = ', '.join(map(str, s.backuplist)),
-			))
-
-			sl.add("")
-
-			if s.mount:
-				if os.path.ismount(s.mount):
-					sl.add("WARNING: Skipping mount of", s.mount, "because it's already mounted", lvl=-1)
-				else:
-					# Mount specified location
-					cmd = ["mount", s.mount ]
-					sl.add("Mounting", s.mount)
-					p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-					stdout, stderr = p.communicate()
-					ret = p.poll()
-					if ret != 0:
-						sl.add("WARNING: Mount of", s.mount, "failed with return code", ret, lvl=-1)
-
-
-			# Calculate curret hanoi day and suffix to use
-			hanoisuf = ""
-			if s.hanoi > 0:
-				today = (starttime.date() - s.hanoiday).days + 1
-				i = s.hanoi
-				while i >= 0:
-					if today % 2 ** i == 0:
-						hanoisuf = chr(i+65)
-						break
-					i -= 1
-				sl.add("First hanoi day:", s.hanoiday, lvl=1)
-				sl.add("Hanoi sets to use:", s.hanoi)
-				sl.add("Today is hanoi day", today, "- using suffix:", hanoisuf)
-
-			plink = []
-
-			if s.hardlink and not s.program.hardlink_support:
-				sl.add("Will NOT use hark linking (not supported in {})".format(s.program), lvl=-1)
-
-			elif s.hardlink:
-				# Seek for most recent backup set to hard link
-				if s.remdst:
-					#Backing up to a remote path
-					(path, base) = os.path.split(s.remdst.group(2))
-					sl.add("Backing up to remote path:", s.remdst.group(1), s.remdst.group(2), lvl=1)
-					cmd = ["ssh", "-o", "BatchMode=true", s.remdst.group(1), "ls -l --color=never --time-style=long-iso -t -1 \"" + path + "\"" ]
-					sl.add("Issuing remote command:", cmd)
-					p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-					stdout, stderr = p.communicate()
-					sl.add("Subprocess return code:", p.poll())
-					if len(stderr):
-						sl.add("WARNING: stderr was not empty:", stderr, lvl=-1)
-					files = stdout.split(b'\n')
-					psets:list[tuple[str,datetime]] = []
-					for file in files:
-						m = rlsparser.match(file.decode())
-						# If file matched regexp and is a directory
-						if m and m.group(1)[0] == "d":
-							btime = datetime.strptime(m.group(6),"%Y-%m-%d %H:%M")
-							psets.append((m.group(7),btime))
-				else:
-					(path, base) = os.path.split(s.dst)
-					dirs = os.listdir(path)
-					psets = []
-					for d in dirs:
-						if ( d == base or d[:len(base)] + s.sep == base + s.sep ) and S_ISDIR(os.lstat(path+"/"+d)[ST_MODE]):
-							btime = datetime.fromtimestamp(os.stat(path+"/"+d).st_mtime)
-							psets.append((d,btime))
-					psets = sorted(psets, key=lambda pset: pset[1], reverse=True) #Sort by age
-
-				for pset in psets:
-					sl.add("Found previous backup:", pset[0], "(", pset[1], ")", lvl=1)
-					if pset[0] != base + s.sep + hanoisuf:
-						plink.append(path + "/" + pset[0])
-
-				if len(plink):
-					sl.add("Will hard link against", plink)
-				else:
-					sl.add("Will NOT use hard linking (no suitable set found)")
-
-			else:
-				sl.add("Will NOT use hark linking (disabled)")
-
-			tarlogs:list[pathlib.Path] = []
-			setsuccess = True
-
-			if s.pre:
-				# Pre-backup tasks
-				goon = False
-				for pre_cmd in s.pre:
-					sl.add("Running pre-backup task: %s" % pre_cmd)
-					ret = subprocess.call(pre_cmd, shell=True)
-					if ret != 0:
-						sl.add("ERROR: %s failed with return code %i" % (pre_cmd, ret), lvl=-2)
-						setsuccess=False
-						if s.skiponpreerror:
-							sl.add("ERROR: Skipping", s.name, "set, SKIPONPREERROR is set.", lvl=-2)
-							break
-				else:
-					goon = True
-				if not goon:
-					continue
-
-			if s.checkdst:
-				# Checks whether the given backup destination exists
-				try:
-					i = os.path.exists(s.dst)
-					if not i:
-						sl.add("WARNING: Skipping", s.name, "set, destination", s.dst, "not found.", lvl=-1)
-						continue
-				except:
-					sl.add("WARNING: Skipping", s.name, "set, read error on", s.dst, ".", lvl=-1)
-					continue
-
-			# Put a file containing backup date on dest dir
-			tmpdir = tempfile.TemporaryDirectory(prefix=f'job_{os.getpid()}_', dir=cacheDir)
-			tmpfile:pathlib.Path|None = None
-			if s.datefile:
-				if safe:
-					sl.add("Skipping creation of datefile", s.datefile)
-				else:
-					tmpfile = pathlib.Path(tmpdir.name) / s.datefile
-					assert tmpfile is not None
-					sl.add("Generating datefile", str(tmpfile))
-					with open(tmpfile, "wt") as tmpfile_h:
-						tmpfile_h.write(str(datetime.now())+"\n")
-					s.backuplist.append(tmpfile)
-
-			for bel in s.backuplist:
-				sl.add("Backing up", str(bel), "on", s.name, "...")
-				tarlogfile = None
-				if s.mailto:
-					tarlogfile_ext = '.log'
-					if s.compresslog:
-						tarlogfile_ext += '.gz'
-					tarlogfile = pathlib.Path(tmpdir.name) / (re.sub(r'(\/|\.)', '_', s.name + '-' + str(bel)) + tarlogfile_ext)
-					tarlogs.append(tarlogfile)
-
-				#Build command line
-				cmd = s.program.get_cmd(s, bel, hanoisuf, plink)
-
-				if safe:
-					nlvl = 0
-				else:
-					nlvl = 1
-				sl.add("Commandline:", cmd, lvl=nlvl)
-				if tarlogfile:
-					sl.add("Will write STDOUT and STDERR to", str(tarlogfile), lvl=1)
-
-				if not safe:
-					# Execute the backup
-					sys.stdout.flush()
-
-					if not tarlogfile:
-						tarlogfile_handle:typing.IO[bytes]|gzip.GzipFile|None = None
-					elif s.compresslog:
-						tarlogfile_handle = gzip.open(tarlogfile, 'wb')
-					else:
-						tarlogfile_handle = open(tarlogfile, 'wb')
-
-					try:
-						p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
-					except OSError as e:
-						print("ERROR: Unable to locate file", e.filename)
-						print("Path: ", os.environ['PATH'])
-						return 1
-
-					if psutil is None:
-						sl.add("WARNING: psutil library not installed while trying to set niceness", lvl=-1)
-					else:
-						try:
-							ps_p = psutil.Process(p.pid)
-
-							if s.nice != 0:
-								sl.add("Setting process niceness to", str(s.nice), lvl=1)
-								ps_p.nice(s.nice)
-
-							if s.ionice != 0:
-								sl.add("Setting process i/o class to", str(s.ionice), 'level', s.ionice_level, lvl=1)
-								ps_p.ionice(s.ionice, s.ionice_level)
-						except psutil.NoSuchProcess:
-							sl.add("WARNING: process not found while trying to set niceness", lvl=-1)
-
-					if p.stdout is None or p.stderr is None:
-						raise RuntimeError("Unable to open streams")
-					elif isinstance(s.program, ProgramRsync):
-						# Rsync writes error to stderr and normal/operational info to stderr
-						spoct = SubProcessCommThread('STDOUT', p.stdout, tarlogfile_handle, sl, False, s, False)
-						spect = SubProcessCommThread('STDERR', p.stderr, None, sl, True, s, True)
-					elif isinstance(s.program, ProgramRclone):
-						# Rclone writes all output to stderr, in JSON
-						spoct = SubProcessCommThread('STDOUT', p.stdout, None, sl, True, s, False)
-						spect = SubProcessCommThread('STDERR', p.stderr, tarlogfile_handle, sl, False, s, True)
-					else:
-						raise NotImplementedError(s.program.__class__.__name__)
-
-					spoct.start()
-					spect.start()
-
-					ret = p.wait()
-
-					spoct.join()
-					spect.join()
-
-					if tarlogfile_handle:
-						tarlogfile_handle.close()
-
-					goodrets = s.program.get_good_exit_codes(s)
-
-					if ret in goodrets:
-						retmessage = 'Good'
-					else:
-						retmessage = 'Bad'
-						setsuccess = False
-					retdescr = s.program.get_exit_code_descr(ret)
-					sl.add(f"Done. {retmessage} exit status:", ret, retdescr)
-
-					# Error if had bad output
-					for spct in spoct, spect:
-						quotedstderrlines = []
-
-						for reason, line in spct.errors:
-							quotedstderrlines.append(reason + '!> ' + line.decode('utf-8', errors='replace').rstrip('\n'))
-
-						if not quotedstderrlines:
-							continue
-
-						setsuccess = False
-						sl.add("ERROR: " + spct.name + " had errors:")
-						for ql in quotedstderrlines:
-							sl.add(ql)
-
-					# Show full recorded output anyway
-					for spct in spoct, spect:
-						if not spct.output:
-							continue
-
-						sl.add("INFO: full " + spct.name + ":")
-						for line in spct.output:
-							sl.add(line.decode('utf-8', errors='replace').rstrip('\n'))
-
-				if s.sleep > 0:
-					if safe:
-						sl.add("Should sleep", s.sleep, "secs now, skipping.")
-					else:
-						sl.add("Sleeping", s.sleep, "secs.")
-						sleep(s.sleep)
-
-			# Delete dirs from deletelist
-			for d in s.deletelist:
-				deldest = s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") + os.sep + d
-				if os.path.exists(deldest) and os.path.isdir(deldest):
-					sl.add('DELETING folder in deletelist %s' % deldest)
-					shutil.rmtree(deldest)
-
-			# Save last backup execution time
-			if s.interval and s.interval > timedelta(seconds=0):
-				if safe:
-					sl.add("Skipping write of last backup timestamp")
-				else:
-					sl.add("Writing last backup timestamp", lvl=1)
-
-					# Create cachedir if missing
-					cachefile = cacheDir + os.sep + s.name
-					CACHEFILE = open(cachefile,'w')
-					CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
-					CACHEFILE.close()
-
-			# Create backup symlink, is using hanoi and not remote
-			if len(hanoisuf)>0 and not s.remdst:
-				if os.path.exists(s.dst) and S_ISLNK(os.lstat(s.dst)[ST_MODE]):
-					if safe:
-						sl.add("Skipping deletion of old symlink", s.dst)
-					else:
-						sl.add("Deleting old symlink", s.dst)
-						os.unlink(s.dst)
-				if not os.path.exists(s.dst):
-					if safe:
-						sl.add("Skipping creation of symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
-					else:
-						sl.add("Creating symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
-						os.symlink(s.dst+s.sep+hanoisuf, s.dst)
-				elif not safe:
-					sl.add("WARNING: Can't create symlink", s.dst, "a file with such name exists", lvl=-1)
-
-			stooktime = datetime.now() - sstarttime
-			if setsuccess:
-				how = "succesfully"
-			else:
-				how = "with errors"
-			sl.add(f"Set {s.name} completed {how}. Took: {stooktime}")
-
-			# Umount
-			if s.umount:
-				if not os.path.ismount(s.umount):
-					sl.add("WARNING: Skipping umount of", s.umount, "because it's not mounted", lvl=-1)
-				else:
-					# Umount specified location
-					cmd = ["umount", s.umount ]
-					sl.add("Umounting", s.umount)
-					p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-					stdout, stderr = p.communicate()
-					ret = p.poll()
-					if ret != 0:
-						sl.add("WARNING: Umount of", s.umount, "failed with return code", ret, lvl=-1)
-
-			# Send email
-			if s.mailto:
-				if safe:
-					sl.add("Skipping sending detailed logs to", s.mailto)
-				else:
-					if s.smtphost:
-						sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost, "port", s.smtpport, "ssl", s.smtpssl)
-					else:
-						sl.add("Sending detailed logs to", s.mailto, "using local smtp")
-
-					# Create main message
-					msg = MIMEMultipart()
-					msg["Message-ID"] = email.utils.make_msgid()
-					msg["X-Jabs-Version"] = consts.version_str()
-					msg["X-Jabs-Host"] = hostname
-					msg["Date"] = email.utils.formatdate(localtime=True)
-					if setsuccess:
-						i = "OK"
-					else:
-						i = "FAILED"
-					msg['Subject'] = "Backup of " + s.name + " " + i
-					msg["X-Jabs-SetSuccess"] = str(setsuccess).lower()
-					msg["X-Jabs-SetName"] = s.name
-					if s.mailfrom:
-						m_from = s.mailfrom
-					else:
-						m_from = username + "@" + hostname
-					msg['From'] = m_from
-					msg['To'] = ', '.join(s.mailto)
-					msg.preamble = 'This is a milti-part message in MIME format.'
-
-					# Add base text
-					txt = sl.getstr() + "\n\nDetailed logs are attached.\n"
-					txt = MIMEText(txt)
-					msg.attach(txt)
-
-					# Add attachments
-					for tl in tarlogs:
-						if not tl.exists():
-							continue
-
-						with open(tl, 'rb') as f:
-							if s.compresslog:
-								att:MIMEApplication|MIMEText = MIMEApplication(f.read(),'gzip')
-							else:
-								att = MIMEText(f.read().decode(errors='replace'),'plain','utf-8')
-						att.add_header(
-							'Content-Disposition',
-							'attachment',
-							filename=os.path.basename(tl)
+		if parallel:
+			prefixes = MyLogger.color_prefixes(sets)
+			# Group sets by PRI: same PRI runs concurrently, groups execute in ascending PRI order
+			pri_groups = [list(g) for _, g in itertools.groupby(sets, key=lambda s: s.pri)]
+			for group in pri_groups:
+				with concurrent.futures.ThreadPoolExecutor(max_workers=len(group)) as executor:
+					futures = [
+						executor.submit(
+							self._run_set, s,
+							cacheDir, safe, starttime, backupheader_tpl,
+							pversions_str, hostname, username, prefixes[s.name]
 						)
-						msg.attach(att)
-
-					# Send the message
-					if s.smtphost:
-						smtp_port = 0 if s.smtpport is None else s.smtpport
-						if s.smtpssl:
-							smtp:smtplib.SMTP_SSL|smtplib.SMTP = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
-						else:
-							smtp = smtplib.SMTP(s.smtphost, smtp_port, timeout=s.smtptimeout)
-					else:
-						smtp = smtplib.SMTP(timeout=s.smtptimeout)
-						smtp.connect()
-					#smtp.set_debuglevel(1)
-					if s.smtpuser or s.smtppass:
-						smtp.login(s.smtpuser, s.smtppass)
-					smtp.sendmail(m_from, s.mailto, msg.as_string())
-					smtp.quit()
-
-			# Delete temporary logs, if any
-			for tl in tarlogs:
-				if tl.exists():
-					sl.add("Deleting log file", str(tl), lvl=1)
-					tl.unlink()
-			tarlogs.clear()
-
-			# Delete tmpfile, if created
-			if tmpfile and tmpfile.exists():
-				sl.add("Deleting temporary files")
-				tmpfile.unlink()
-			if tmpdir:
-				tmpdir.cleanup()
+						for s in group
+					]
+				# All threads in this group have finished; check for hard errors before next stage
+				exceptions = [(s.name, f.exception()) for s, f in zip(group, futures) if f.exception() is not None]
+				if exceptions:
+					for set_name, exc in exceptions:
+						print(f"ERROR: Unhandled exception in set {set_name!r}: {exc}", file=sys.stderr)
+					return 1
+		else:
+			for s in sets:
+				self._run_set(
+					s, cacheDir, safe, starttime, backupheader_tpl,
+					pversions_str, hostname, username
+				)
 
 		took = datetime.now() - starttime
 		if self.debug > -1:
@@ -1024,8 +1101,9 @@ $pversions
 
 
 def runFromCommandLine() -> int:
-	''' Parses the command line and runs JABS
-	@return int exit status, 0 on success
+	'''
+		Parses the command line and runs JABS.
+		@return int exit status, 0 on success
 	'''
 
 	parser = argparse.ArgumentParser(description=VERSION)
@@ -1046,6 +1124,8 @@ def runFromCommandLine() -> int:
 		help="batch mode: exit silently if script is already running")
 	parser.add_argument("-s", "--safe", action="store_true",
 		help="safe mode: just print what will do, don't change anything")
+	parser.add_argument("-p", "--parallel", action="store_true",
+		help="run sets with the same PRI concurrently; higher-PRI sets start only after all lower-PRI sets complete")
 	parser.add_argument("sets", nargs="*",
 		help="list of sets to run; if omited, will run all")
 
@@ -1066,7 +1146,8 @@ def runFromCommandLine() -> int:
 		onlySets = args.sets,
 		force = args.force,
 		batch = args.batch,
-		safe = args.safe
+		safe = args.safe,
+		parallel = args.parallel,
 	)
 
 

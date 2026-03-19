@@ -24,7 +24,7 @@ import os
 import sys
 import logging
 import datetime
-import dateutil.parser
+import dateutil.parser  # type: ignore[import-untyped]
 import traceback
 import configparser
 import subprocess
