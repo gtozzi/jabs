@@ -533,9 +533,6 @@ class Jabs:
 					if self.debug > 0:
 						print("Will run", s.name, "every", s.interval)
 					cachefile = cacheDir + "/" + s.name
-					if not os.path.exists(cacheDir):
-						print("WARNING: Cache directory missing, creating it")
-						os.mkdir(os.path.dirname(cachefile))
 					if not os.path.exists(cachefile):
 						lastdone = datetime.fromtimestamp(0)
 						print("WARNING: Last backup timestamp for", s.name, "is missing. Assuming 01-01-1970")
@@ -580,6 +577,9 @@ class Jabs:
 		# Check if some set is still remaining after checks
 		if not len(sets):
 			return 0
+
+		# Ensure cache directory exists before any set processing
+		os.makedirs(cacheDir, 0o700, exist_ok=True)
 
 		# Print the backup header
 		backupheader_tpl = Template("""
@@ -646,19 +646,6 @@ $pversions
 					if ret != 0:
 						sl.add("WARNING: Mount of", s.mount, "failed with return code", ret, lvl=-1)
 
-			# Put a file cointaining backup date on dest dir
-			tmpdir = tempfile.TemporaryDirectory(prefix='jabs_')
-			tmpfile:pathlib.Path|None = None
-			if s.datefile:
-				if safe:
-					sl.add("Skipping creation of datefile", s.datefile)
-				else:
-					tmpfile = pathlib.Path(tmpdir.name) / s.datefile
-					assert tmpfile is not None
-					sl.add("Generating datefile", str(tmpfile))
-					with open(tmpfile, "wt") as tmpfile_h:
-						tmpfile_h.write(str(datetime.now())+"\n")
-					s.backuplist.append(tmpfile)
 
 			# Calculate curret hanoi day and suffix to use
 			hanoisuf = ""
@@ -753,6 +740,20 @@ $pversions
 				except:
 					sl.add("WARNING: Skipping", s.name, "set, read error on", s.dst, ".", lvl=-1)
 					continue
+
+			# Put a file containing backup date on dest dir
+			tmpdir = tempfile.TemporaryDirectory(prefix=f'job_{os.getpid()}_', dir=cacheDir)
+			tmpfile:pathlib.Path|None = None
+			if s.datefile:
+				if safe:
+					sl.add("Skipping creation of datefile", s.datefile)
+				else:
+					tmpfile = pathlib.Path(tmpdir.name) / s.datefile
+					assert tmpfile is not None
+					sl.add("Generating datefile", str(tmpfile))
+					with open(tmpfile, "wt") as tmpfile_h:
+						tmpfile_h.write(str(datetime.now())+"\n")
+					s.backuplist.append(tmpfile)
 
 			for bel in s.backuplist:
 				sl.add("Backing up", str(bel), "on", s.name, "...")
@@ -889,10 +890,6 @@ $pversions
 					sl.add("Writing last backup timestamp", lvl=1)
 
 					# Create cachedir if missing
-					if not os.path.exists(cacheDir):
-						# 448 corresponds to octal 0700 and is both python 2 and 3 compatible
-						os.makedirs(cacheDir, 448)
-
 					cachefile = cacheDir + os.sep + s.name
 					CACHEFILE = open(cachefile,'w')
 					CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
