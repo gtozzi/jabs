@@ -616,275 +616,273 @@ class Jabs:
 		# Put a file containing backup date on dest dir
 		tmpdir = tempfile.TemporaryDirectory(prefix=f'job_{os.getpid()}_', dir=cacheDir)
 		tmpfile:pathlib.Path|None = None
-		try:
-			if s.datefile:
-				if safe:
-					sl.add("Skipping creation of datefile", s.datefile)
-				else:
-					tmpfile = pathlib.Path(tmpdir.name) / s.datefile
-					assert tmpfile is not None
-					sl.add("Generating datefile", str(tmpfile))
-					with open(tmpfile, "wt") as tmpfile_h:
-						tmpfile_h.write(str(datetime.now())+"\n")
-					s.backuplist.append(tmpfile)
-
-			for bel in s.backuplist:
-				sl.add("Backing up", str(bel), "on", s.name, "...")
-				tarlogfile = None
-				if s.mailto:
-					tarlogfile_ext = '.log'
-					if s.compresslog:
-						tarlogfile_ext += '.gz'
-					tarlogfile = pathlib.Path(tmpdir.name) / (re.sub(r'(\/|\.)', '_', s.name + '-' + str(bel)) + tarlogfile_ext)
-					tarlogs.append(tarlogfile)
-
-				#Build command line
-				cmd = s.program.get_cmd(s, bel, hanoisuf, plink)
-
-				if safe:
-					nlvl = 0
-				else:
-					nlvl = 1
-				sl.add("Commandline:", cmd, lvl=nlvl)
-				if tarlogfile:
-					sl.add("Will write STDOUT and STDERR to", str(tarlogfile), lvl=1)
-
-				if not safe:
-					# Execute the backup
-					sys.stdout.flush()
-
-					if not tarlogfile:
-						tarlogfile_handle:typing.IO[bytes]|gzip.GzipFile|None = None
-					elif s.compresslog:
-						tarlogfile_handle = gzip.open(tarlogfile, 'wb')
-					else:
-						tarlogfile_handle = open(tarlogfile, 'wb')
-
-					try:
-						p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
-					except OSError as e:
-						raise RuntimeError(f"Unable to locate executable {e.filename!r} (PATH={os.environ['PATH']})")
-
-					if psutil is None:
-						sl.add("WARNING: psutil library not installed while trying to set niceness", lvl=-1)
-					else:
-						try:
-							ps_p = psutil.Process(p.pid)
-
-							if s.nice != 0:
-								sl.add("Setting process niceness to", str(s.nice), lvl=1)
-								ps_p.nice(s.nice)
-
-							if s.ionice != 0:
-								sl.add("Setting process i/o class to", str(s.ionice), 'level', s.ionice_level, lvl=1)
-								ps_p.ionice(s.ionice, s.ionice_level)
-						except psutil.NoSuchProcess:
-							sl.add("WARNING: process not found while trying to set niceness", lvl=-1)
-
-					if p.stdout is None or p.stderr is None:
-						raise RuntimeError("Unable to open streams")
-					elif isinstance(s.program, ProgramRsync):
-						# Rsync writes error to stderr and normal/operational info to stderr
-						spoct = SubProcessCommThread('STDOUT', p.stdout, tarlogfile_handle, sl, False, s, False)
-						spect = SubProcessCommThread('STDERR', p.stderr, None, sl, True, s, True)
-					elif isinstance(s.program, ProgramRclone):
-						# Rclone writes all output to stderr, in JSON
-						spoct = SubProcessCommThread('STDOUT', p.stdout, None, sl, True, s, False)
-						spect = SubProcessCommThread('STDERR', p.stderr, tarlogfile_handle, sl, False, s, True)
-					else:
-						raise NotImplementedError(s.program.__class__.__name__)
-
-					spoct.start()
-					spect.start()
-
-					ret = p.wait()
-
-					spoct.join()
-					spect.join()
-
-					if tarlogfile_handle:
-						tarlogfile_handle.close()
-
-					goodrets = s.program.get_good_exit_codes(s)
-
-					if ret in goodrets:
-						retmessage = 'Good'
-					else:
-						retmessage = 'Bad'
-						setsuccess = False
-					retdescr = s.program.get_exit_code_descr(ret)
-					sl.add(f"Done. {retmessage} exit status:", ret, retdescr)
-
-					# Error if had bad output
-					for spct in spoct, spect:
-						quotedstderrlines = []
-
-						for reason, line in spct.errors:
-							quotedstderrlines.append(reason + '!> ' + line.decode('utf-8', errors='replace').rstrip('\n'))
-
-						if not quotedstderrlines:
-							continue
-
-						setsuccess = False
-						sl.add("ERROR: " + spct.name + " had errors:")
-						for ql in quotedstderrlines:
-							sl.add(ql)
-
-					# Show full recorded output anyway
-					for spct in spoct, spect:
-						if not spct.output:
-							continue
-
-						sl.add("INFO: full " + spct.name + ":")
-						for line in spct.output:
-							sl.add(line.decode('utf-8', errors='replace').rstrip('\n'))
-
-				if s.sleep > 0:
-					if safe:
-						sl.add("Should sleep", s.sleep, "secs now, skipping.")
-					else:
-						sl.add("Sleeping", s.sleep, "secs.")
-						sleep(s.sleep)
-
-			# Delete dirs from deletelist
-			for d in s.deletelist:
-				deldest = s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") + os.sep + d
-				if os.path.exists(deldest) and os.path.isdir(deldest):
-					sl.add('DELETING folder in deletelist %s' % deldest)
-					shutil.rmtree(deldest)
-
-			# Save last backup execution time
-			if s.interval and s.interval > timedelta(seconds=0):
-				if safe:
-					sl.add("Skipping write of last backup timestamp")
-				else:
-					sl.add("Writing last backup timestamp", lvl=1)
-					cachefile = cacheDir + os.sep + s.name
-					CACHEFILE = open(cachefile,'w')
-					CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
-					CACHEFILE.close()
-
-			# Create backup symlink, is using hanoi and not remote
-			if len(hanoisuf)>0 and not s.remdst:
-				if os.path.exists(s.dst) and S_ISLNK(os.lstat(s.dst)[ST_MODE]):
-					if safe:
-						sl.add("Skipping deletion of old symlink", s.dst)
-					else:
-						sl.add("Deleting old symlink", s.dst)
-						os.unlink(s.dst)
-				if not os.path.exists(s.dst):
-					if safe:
-						sl.add("Skipping creation of symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
-					else:
-						sl.add("Creating symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
-						os.symlink(s.dst+s.sep+hanoisuf, s.dst)
-				elif not safe:
-					sl.add("WARNING: Can't create symlink", s.dst, "a file with such name exists", lvl=-1)
-
-			stooktime = datetime.now() - sstarttime
-			if setsuccess:
-				how = "succesfully"
+		if s.datefile:
+			if safe:
+				sl.add("Skipping creation of datefile", s.datefile)
 			else:
-				how = "with errors"
-			sl.add(f"Set {s.name} completed {how}. Took: {stooktime}")
+				tmpfile = pathlib.Path(tmpdir.name) / s.datefile
+				assert tmpfile is not None
+				sl.add("Generating datefile", str(tmpfile))
+				with open(tmpfile, "wt") as tmpfile_h:
+					tmpfile_h.write(str(datetime.now())+"\n")
+				s.backuplist.append(tmpfile)
 
-			# Umount
-			if s.umount:
-				if not os.path.ismount(s.umount):
-					sl.add("WARNING: Skipping umount of", s.umount, "because it's not mounted", lvl=-1)
-				else:
-					# Umount specified location
-					cmd = ["umount", s.umount ]
-					sl.add("Umounting", s.umount)
-					p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-					stdout, stderr = p.communicate()
-					ret = p.poll()
-					if ret != 0:
-						sl.add("WARNING: Umount of", s.umount, "failed with return code", ret, lvl=-1)
-
-			# Send email
+		for bel in s.backuplist:
+			sl.add("Backing up", str(bel), "on", s.name, "...")
+			tarlogfile = None
 			if s.mailto:
-				if safe:
-					sl.add("Skipping sending detailed logs to", s.mailto)
+				tarlogfile_ext = '.log'
+				if s.compresslog:
+					tarlogfile_ext += '.gz'
+				tarlogfile = pathlib.Path(tmpdir.name) / (re.sub(r'(\/|\.)', '_', s.name + '-' + str(bel)) + tarlogfile_ext)
+				tarlogs.append(tarlogfile)
+
+			#Build command line
+			cmd = s.program.get_cmd(s, bel, hanoisuf, plink)
+
+			if safe:
+				nlvl = 0
+			else:
+				nlvl = 1
+			sl.add("Commandline:", cmd, lvl=nlvl)
+			if tarlogfile:
+				sl.add("Will write STDOUT and STDERR to", str(tarlogfile), lvl=1)
+
+			if not safe:
+				# Execute the backup
+				sys.stdout.flush()
+
+				if not tarlogfile:
+					tarlogfile_handle:typing.IO[bytes]|gzip.GzipFile|None = None
+				elif s.compresslog:
+					tarlogfile_handle = gzip.open(tarlogfile, 'wb')
 				else:
-					if s.smtphost:
-						sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost, "port", s.smtpport, "ssl", s.smtpssl)
-					else:
-						sl.add("Sending detailed logs to", s.mailto, "using local smtp")
+					tarlogfile_handle = open(tarlogfile, 'wb')
 
-					# Create main message
-					msg = MIMEMultipart()
-					msg["Message-ID"] = email.utils.make_msgid()
-					msg["X-Jabs-Version"] = consts.version_str()
-					msg["X-Jabs-Host"] = hostname
-					msg["Date"] = email.utils.formatdate(localtime=True)
-					if setsuccess:
-						i = "OK"
-					else:
-						i = "FAILED"
-					msg['Subject'] = "Backup of " + s.name + " " + i
-					msg["X-Jabs-SetSuccess"] = str(setsuccess).lower()
-					msg["X-Jabs-SetName"] = s.name
-					if s.mailfrom:
-						m_from = s.mailfrom
-					else:
-						m_from = username + "@" + hostname
-					msg['From'] = m_from
-					msg['To'] = ', '.join(s.mailto)
-					msg.preamble = 'This is a milti-part message in MIME format.'
+				try:
+					p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
+				except OSError as e:
+					raise RuntimeError(f"Unable to locate executable {e.filename!r} (PATH={os.environ['PATH']})")
 
-					# Add base text
-					txt = sl.getstr() + "\n\nDetailed logs are attached.\n"
-					txt = MIMEText(txt)
-					msg.attach(txt)
+				if psutil is None:
+					sl.add("WARNING: psutil library not installed while trying to set niceness", lvl=-1)
+				else:
+					try:
+						ps_p = psutil.Process(p.pid)
 
-					# Add attachments
-					for tl in tarlogs:
-						if not tl.exists():
-							continue
+						if s.nice != 0:
+							sl.add("Setting process niceness to", str(s.nice), lvl=1)
+							ps_p.nice(s.nice)
 
-						with open(tl, 'rb') as f:
-							if s.compresslog:
-								att:MIMEApplication|MIMEText = MIMEApplication(f.read(),'gzip')
-							else:
-								att = MIMEText(f.read().decode(errors='replace'),'plain','utf-8')
-						att.add_header(
-							'Content-Disposition',
-							'attachment',
-							filename=os.path.basename(tl)
-						)
-						msg.attach(att)
+						if s.ionice != 0:
+							sl.add("Setting process i/o class to", str(s.ionice), 'level', s.ionice_level, lvl=1)
+							ps_p.ionice(s.ionice, s.ionice_level)
+					except psutil.NoSuchProcess:
+						sl.add("WARNING: process not found while trying to set niceness", lvl=-1)
 
-					# Send the message
-					if s.smtphost:
-						smtp_port = 0 if s.smtpport is None else s.smtpport
-						if s.smtpssl:
-							smtp:smtplib.SMTP_SSL|smtplib.SMTP = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
+				if p.stdout is None or p.stderr is None:
+					raise RuntimeError("Unable to open streams")
+				elif isinstance(s.program, ProgramRsync):
+					# Rsync writes error to stderr and normal/operational info to stderr
+					spoct = SubProcessCommThread('STDOUT', p.stdout, tarlogfile_handle, sl, False, s, False)
+					spect = SubProcessCommThread('STDERR', p.stderr, None, sl, True, s, True)
+				elif isinstance(s.program, ProgramRclone):
+					# Rclone writes all output to stderr, in JSON
+					spoct = SubProcessCommThread('STDOUT', p.stdout, None, sl, True, s, False)
+					spect = SubProcessCommThread('STDERR', p.stderr, tarlogfile_handle, sl, False, s, True)
+				else:
+					raise NotImplementedError(s.program.__class__.__name__)
+
+				spoct.start()
+				spect.start()
+
+				ret = p.wait()
+
+				spoct.join()
+				spect.join()
+
+				if tarlogfile_handle:
+					tarlogfile_handle.close()
+
+				goodrets = s.program.get_good_exit_codes(s)
+
+				if ret in goodrets:
+					retmessage = 'Good'
+				else:
+					retmessage = 'Bad'
+					setsuccess = False
+				retdescr = s.program.get_exit_code_descr(ret)
+				sl.add(f"Done. {retmessage} exit status:", ret, retdescr)
+
+				# Error if had bad output
+				for spct in spoct, spect:
+					quotedstderrlines = []
+
+					for reason, line in spct.errors:
+						quotedstderrlines.append(reason + '!> ' + line.decode('utf-8', errors='replace').rstrip('\n'))
+
+					if not quotedstderrlines:
+						continue
+
+					setsuccess = False
+					sl.add("ERROR: " + spct.name + " had errors:")
+					for ql in quotedstderrlines:
+						sl.add(ql)
+
+				# Show full recorded output anyway
+				for spct in spoct, spect:
+					if not spct.output:
+						continue
+
+					sl.add("INFO: full " + spct.name + ":")
+					for line in spct.output:
+						sl.add(line.decode('utf-8', errors='replace').rstrip('\n'))
+
+			if s.sleep > 0:
+				if safe:
+					sl.add("Should sleep", s.sleep, "secs now, skipping.")
+				else:
+					sl.add("Sleeping", s.sleep, "secs.")
+					sleep(s.sleep)
+
+		# Delete dirs from deletelist
+		for d in s.deletelist:
+			deldest = s.dst + (s.sep+hanoisuf if len(hanoisuf)>0 else "") + os.sep + d
+			if os.path.exists(deldest) and os.path.isdir(deldest):
+				sl.add('DELETING folder in deletelist %s' % deldest)
+				shutil.rmtree(deldest)
+
+		# Save last backup execution time
+		if s.interval and s.interval > timedelta(seconds=0):
+			if safe:
+				sl.add("Skipping write of last backup timestamp")
+			else:
+				sl.add("Writing last backup timestamp", lvl=1)
+				cachefile = cacheDir + os.sep + s.name
+				CACHEFILE = open(cachefile,'w')
+				CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
+				CACHEFILE.close()
+
+		# Create backup symlink, is using hanoi and not remote
+		if len(hanoisuf)>0 and not s.remdst:
+			if os.path.exists(s.dst) and S_ISLNK(os.lstat(s.dst)[ST_MODE]):
+				if safe:
+					sl.add("Skipping deletion of old symlink", s.dst)
+				else:
+					sl.add("Deleting old symlink", s.dst)
+					os.unlink(s.dst)
+			if not os.path.exists(s.dst):
+				if safe:
+					sl.add("Skipping creation of symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
+				else:
+					sl.add("Creating symlink", s.dst, "to", s.dst+s.sep+hanoisuf)
+					os.symlink(s.dst+s.sep+hanoisuf, s.dst)
+			elif not safe:
+				sl.add("WARNING: Can't create symlink", s.dst, "a file with such name exists", lvl=-1)
+
+		stooktime = datetime.now() - sstarttime
+		if setsuccess:
+			how = "succesfully"
+		else:
+			how = "with errors"
+		sl.add(f"Set {s.name} completed {how}. Took: {stooktime}")
+
+		# Umount
+		if s.umount:
+			if not os.path.ismount(s.umount):
+				sl.add("WARNING: Skipping umount of", s.umount, "because it's not mounted", lvl=-1)
+			else:
+				# Umount specified location
+				cmd = ["umount", s.umount ]
+				sl.add("Umounting", s.umount)
+				p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+				stdout, stderr = p.communicate()
+				ret = p.poll()
+				if ret != 0:
+					sl.add("WARNING: Umount of", s.umount, "failed with return code", ret, lvl=-1)
+
+		# Send email
+		if s.mailto:
+			if safe:
+				sl.add("Skipping sending detailed logs to", s.mailto)
+			else:
+				if s.smtphost:
+					sl.add("Sending detailed logs to", s.mailto, "via", s.smtphost, "port", s.smtpport, "ssl", s.smtpssl)
+				else:
+					sl.add("Sending detailed logs to", s.mailto, "using local smtp")
+
+				# Create main message
+				msg = MIMEMultipart()
+				msg["Message-ID"] = email.utils.make_msgid()
+				msg["X-Jabs-Version"] = consts.version_str()
+				msg["X-Jabs-Host"] = hostname
+				msg["Date"] = email.utils.formatdate(localtime=True)
+				if setsuccess:
+					i = "OK"
+				else:
+					i = "FAILED"
+				msg['Subject'] = "Backup of " + s.name + " " + i
+				msg["X-Jabs-SetSuccess"] = str(setsuccess).lower()
+				msg["X-Jabs-SetName"] = s.name
+				if s.mailfrom:
+					m_from = s.mailfrom
+				else:
+					m_from = username + "@" + hostname
+				msg['From'] = m_from
+				msg['To'] = ', '.join(s.mailto)
+				msg.preamble = 'This is a milti-part message in MIME format.'
+
+				# Add base text
+				txt = sl.getstr() + "\n\nDetailed logs are attached.\n"
+				txt = MIMEText(txt)
+				msg.attach(txt)
+
+				# Add attachments
+				for tl in tarlogs:
+					if not tl.exists():
+						continue
+
+					with open(tl, 'rb') as f:
+						if s.compresslog:
+							att:MIMEApplication|MIMEText = MIMEApplication(f.read(),'gzip')
 						else:
-							smtp = smtplib.SMTP(s.smtphost, smtp_port, timeout=s.smtptimeout)
+							att = MIMEText(f.read().decode(errors='replace'),'plain','utf-8')
+					att.add_header(
+						'Content-Disposition',
+						'attachment',
+						filename=os.path.basename(tl)
+					)
+					msg.attach(att)
+
+				# Send the message
+				if s.smtphost:
+					smtp_port = 0 if s.smtpport is None else s.smtpport
+					if s.smtpssl:
+						smtp:smtplib.SMTP_SSL|smtplib.SMTP = smtplib.SMTP_SSL(s.smtphost, smtp_port, timeout=s.smtptimeout)
 					else:
-						smtp = smtplib.SMTP(timeout=s.smtptimeout)
-						smtp.connect()
-					#smtp.set_debuglevel(1)
-					if s.smtpuser or s.smtppass:
-						smtp.login(s.smtpuser, s.smtppass)
-					smtp.sendmail(m_from, s.mailto, msg.as_string())
-					smtp.quit()
+						smtp = smtplib.SMTP(s.smtphost, smtp_port, timeout=s.smtptimeout)
+				else:
+					smtp = smtplib.SMTP(timeout=s.smtptimeout)
+					smtp.connect()
+				#smtp.set_debuglevel(1)
+				if s.smtpuser or s.smtppass:
+					smtp.login(s.smtpuser, s.smtppass)
+				smtp.sendmail(m_from, s.mailto, msg.as_string())
+				smtp.quit()
 
-			# Delete temporary logs, if any
-			for tl in tarlogs:
-				if tl.exists():
-					sl.add("Deleting log file", str(tl), lvl=1)
-					tl.unlink()
-			tarlogs.clear()
+		# Delete temporary logs, if any
+		for tl in tarlogs:
+			if tl.exists():
+				sl.add("Deleting log file", str(tl), lvl=1)
+				tl.unlink()
+		tarlogs.clear()
 
-			# Delete tmpfile, if created
-			if tmpfile and tmpfile.exists():
-				sl.add("Deleting temporary files")
-				tmpfile.unlink()
+		# Delete tmpfile, if created
+		if tmpfile and tmpfile.exists():
+			sl.add("Deleting temporary files")
+			tmpfile.unlink()
 
-		finally:
-			tmpdir.cleanup()
+		tmpdir.cleanup()
 
 	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str|None=None, onlySets:list[str]|None=None, force:bool=False, batch:bool=False, safe:bool=False, parallel:bool=False) -> int:
 		'''
