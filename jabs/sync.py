@@ -70,6 +70,10 @@ import email.utils
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
+import http.server
+import socketserver
+import urllib.request
+import urllib.error
 
 from . import consts
 from . import config as jabs_config
@@ -78,6 +82,8 @@ from . import config as jabs_config
 CONFIGFILE = "/etc/jabs/jabs.cfg"
 VERSION = "jabs v." + consts.version_str()
 CACHEDIR = "/var/cache/jabs"
+# Default port for the HTTP status server (1-JABS on a phone keypad: 1-5-2-2-7)
+STATUS_PORT = 15227
 
 # Useful regexp
 risremote = re.compile(r'(.*@.*):{1,2}(.*)')
@@ -90,6 +96,83 @@ _print_lock = threading.Lock()
 _ANSI_COLORS = ['\033[36m', '\033[33m', '\033[32m', '\033[35m', '\033[34m', '\033[31m']
 _ANSI_RESET = '\033[0m'
 
+
+class StatusServer:
+	'''
+		Lightweight HTTP server that exposes live backup progress as JSON.
+		Runs in a daemon thread; stopped explicitly via stop().
+
+		API:
+		  GET /status  ->  200 application/json
+
+		Response schema:
+		  {
+		    "pid":     <int>,        # PID of the running jabs process
+		    "started": <ISO8601>,    # overall job start time
+		    "now":     <ISO8601>,    # server-side timestamp of this response
+		    "sets": [                # all sets, sorted by pri then name
+		      {
+		        "name":      <str>,         # set name
+		        "pri":       <int>,         # run priority
+		        "running":   <bool>,        # true while actively backing up
+		        "started":   <ISO8601|null>, # when this set started (null = not yet)
+		        "completed": <ISO8601|null>, # when this set finished (null = not yet)
+		        "success":   <bool|null>,   # true/false on finish; null = skipped or pending
+		        "item":      <str|null>,    # source path currently being transferred
+		        "elapsed":   <str>          # only present while running
+		      },
+		      ...
+		    ]
+		  }
+	'''
+
+	class _TCPServer(socketserver.TCPServer):
+		allow_reuse_address = True
+
+	class _Handler(http.server.BaseHTTPRequestHandler):
+		''' Minimal HTTP handler: only serves GET /status '''
+
+		def __init__(self, get_status_fn, *args, **kwargs):
+			self._get_status = get_status_fn
+			super().__init__(*args, **kwargs)
+
+		def do_GET(self) -> None:
+			if self.path != '/status':
+				self.send_error(404)
+				return
+			body = json.dumps(self._get_status(), default=str).encode()
+			self.send_response(200)
+			self.send_header('Content-Type', 'application/json')
+			self.send_header('Content-Length', str(len(body)))
+			self.end_headers()
+			self.wfile.write(body)
+
+		def log_message(self, format, *args) -> None:
+			pass
+
+	def __init__(self, port:int, get_status_fn) -> None:
+		handler = lambda *a, **kw: StatusServer._Handler(get_status_fn, *a, **kw)
+		self._server = StatusServer._TCPServer(('127.0.0.1', port), handler)
+		self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+	def start(self) -> None:
+		self._thread.start()
+
+	def stop(self) -> None:
+		self._server.shutdown()
+
+	@staticmethod
+	def query(port:int) -> dict|None:
+		'''
+			Query a running JABS instance for its live backup status.
+			@param port int: TCP port where the status server is listening
+			@return dict with status payload, or None on failure
+		'''
+		try:
+			with urllib.request.urlopen(f'http://127.0.0.1:{port}/status', timeout=3) as resp:
+				return json.loads(resp.read())
+		except Exception:
+			return None
 
 
 # ------------ FUNCTIONS AND CLASSES ----------------------
@@ -474,6 +557,47 @@ class Jabs:
 	def __init__(self):
 		#TODO: Temporary debug level setting, will use logging instead
 		self.debug = 0
+		self._status_lock = threading.Lock()
+		self._status:dict = {}
+		self._status_server:StatusServer|None = None
+
+	def _update_status(self, set_name:str, item:str, set_started:datetime) -> None:
+		''' Thread-safe per-item progress update; no-op when status server is disabled '''
+		if not self._status:
+			return
+		with self._status_lock:
+			entry = self._status['sets'].get(set_name)
+			if entry:
+				entry['running'] = True
+				entry['started'] = set_started
+				entry['item'] = item
+
+	def _clear_status(self, set_name:str, success:bool|None=None, completed:datetime|None=None) -> None:
+		''' Mark a set as finished in the live status dict '''
+		if not self._status:
+			return
+		with self._status_lock:
+			entry = self._status['sets'].get(set_name)
+			if entry:
+				entry['running'] = False
+				entry['completed'] = completed
+				entry['success'] = success
+
+	def _get_status(self) -> dict:
+		''' Return a JSON-ready status snapshot: sets sorted by pri then name, elapsed added for running sets '''
+		now = datetime.now()
+		with self._status_lock:
+			sets_copy = [dict(v) for v in self._status.get('sets', {}).values()]
+			result = {k: v for k, v in self._status.items() if k != 'sets'}
+		result['now'] = now.isoformat()
+		sets_copy.sort(key=lambda x: (x.get('pri', 0), x.get('name', '')))
+		for info in sets_copy:
+			if info.get('running') and isinstance(info.get('started'), datetime):
+				info['elapsed'] = str(now - info['started'])
+			info['started'] = info['started'].isoformat() if isinstance(info.get('started'), datetime) else info['started']
+			info['completed'] = info['completed'].isoformat() if isinstance(info.get('completed'), datetime) else info['completed']
+		result['sets'] = sets_copy
+		return result
 
 	def _run_set(self, s:BackupSet, cacheDir:str, safe:bool, starttime:datetime,
 				backupheader_tpl:Template, pversions_str:str,
@@ -600,6 +724,7 @@ class Jabs:
 			else:
 				goon = True
 			if not goon:
+				self._clear_status(s.name, success=False, completed=datetime.now())
 				return
 
 		if s.checkdst:
@@ -608,9 +733,11 @@ class Jabs:
 				i = os.path.exists(s.dst)
 				if not i:
 					sl.add("WARNING: Skipping", s.name, "set, destination", s.dst, "not found.", lvl=-1)
+					self._clear_status(s.name, success=None, completed=datetime.now())
 					return
 			except:
 				sl.add("WARNING: Skipping", s.name, "set, read error on", s.dst, ".", lvl=-1)
+				self._clear_status(s.name, success=None, completed=datetime.now())
 				return
 
 		# Put a file containing backup date on dest dir
@@ -628,6 +755,7 @@ class Jabs:
 				s.backuplist.append(tmpfile)
 
 		for bel in s.backuplist:
+			self._update_status(s.name, str(bel), sstarttime)
 			sl.add("Backing up", str(bel), "on", s.name, "...")
 			tarlogfile = None
 			if s.mailto:
@@ -761,6 +889,11 @@ class Jabs:
 				cachefile = cacheDir + os.sep + s.name
 				CACHEFILE = open(cachefile,'w')
 				CACHEFILE.write(str(int(mktime(starttime.timetuple())))+"\n")
+				CACHEFILE.write(json.dumps({
+					'started': sstarttime.isoformat(),
+					'completed': datetime.now().isoformat(),
+					'success': setsuccess,
+				}) + "\n")
 				CACHEFILE.close()
 
 		# Create backup symlink, is using hanoi and not remote
@@ -882,9 +1015,10 @@ class Jabs:
 			sl.add("Deleting temporary files")
 			tmpfile.unlink()
 
+		self._clear_status(s.name, success=setsuccess, completed=datetime.now())
 		tmpdir.cleanup()
 
-	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str|None=None, onlySets:list[str]|None=None, force:bool=False, batch:bool=False, safe:bool=False, parallel:bool=False) -> int:
+	def run(self, cfgPath:str, cacheDir:str, pidFilePath:str|None=None, onlySets:list[str]|None=None, force:bool=False, batch:bool=False, safe:bool=False, parallel:bool=False, status_port:int|None=None) -> int:
 		'''
 			Runs JABS.
 			@param cfgPath str: Path for the config file
@@ -895,6 +1029,7 @@ class Jabs:
 			@param batch bool: When true enables batch mode: exit silently if script is already running
 			@param safe bool: When True enables safe mode: just print what will do, don't change anything
 			@param parallel bool: When True runs independent sets concurrently (grouped by PRI)
+			@param status_port int|None: TCP port for the HTTP status server; None = use config/default; 0 = disabled
 			@return int exit status, 0 on success
 		'''
 		# Init some useful variables
@@ -936,7 +1071,11 @@ class Jabs:
 		#Read the PIDFILE
 		pidfile = config.getstr('PIDFILE') if pidFilePath is None else pidFilePath
 
-		# Check if another insnance of the script is already running
+		# Resolve effective status port: CLI flag > config > module default
+		if status_port is None:
+			status_port = config.getint('STATUS_PORT', default=STATUS_PORT)
+
+		# Check if another instance of the script is already running
 		if os.path.isfile(pidfile):
 			PIDFILE = open(pidfile, "r")
 			try:
@@ -945,12 +1084,24 @@ class Jabs:
 				# The process is no longer running, ok
 				PIDFILE.close()
 			else:
-				# The other process is till running
+				# The other process is still running
 				if batch:
 					return 0
+				if status_port:
+					status = StatusServer.query(status_port)
+					if status:
+						active = [s for s in status.get('sets', []) if s.get('running')]
+						if active:
+							print("Error: this script is already running! Active sets:")
+							for info in active:
+								print(f"  {info['name']}: {info.get('item', '?')} elapsed {info.get('elapsed', '?')}")
+						else:
+							print("Error: this script is already running! (no active sets right now)")
+					else:
+						print("Error: this script is already running! (status unavailable)")
 				else:
 					print("Error: this script is already running!")
-					return 12
+				return 12
 
 		# Save my PID on pidfile
 		try:
@@ -1030,6 +1181,33 @@ class Jabs:
 		# Ensure cache directory exists before any set processing
 		os.makedirs(cacheDir, 0o700, exist_ok=True)
 
+		# Start HTTP status server if a port is configured
+		if status_port:
+			self._status = {
+				'pid': os.getpid(),
+				'started': starttime.isoformat(),
+				'sets': {
+					s.name: {
+						'name': s.name,
+						'pri': s.pri,
+						'running': False,
+						'started': None,
+						'completed': None,
+						'success': None,
+						'item': None,
+					}
+					for s in sets
+				},
+			}
+			try:
+				self._status_server = StatusServer(status_port, self._get_status)
+				self._status_server.start()
+				if self.debug > 0:
+					print(f"Status server listening on port {status_port}")
+			except OSError as e:
+				print(f"WARNING: Could not start status server on port {status_port}: {e}", file=sys.stderr)
+				self._status_server = None
+
 		# Print the backup header
 		backupheader_tpl = Template('''
 -------------------------------------------------
@@ -1083,6 +1261,8 @@ $pversions
 				if exceptions:
 					for set_name, exc in exceptions:
 						print(f"ERROR: Unhandled exception in set {set_name!r}: {exc}", file=sys.stderr)
+					if self._status_server:
+						self._status_server.stop()
 					return 1
 		else:
 			for s in sets:
@@ -1095,6 +1275,8 @@ $pversions
 		if self.debug > -1:
 			print("Backup completed. Took", took)
 
+		if self._status_server:
+			self._status_server.stop()
 		return 0
 
 
@@ -1104,7 +1286,22 @@ def runFromCommandLine() -> int:
 		@return int exit status, 0 on success
 	'''
 
-	parser = argparse.ArgumentParser(description=VERSION)
+	parser = argparse.ArgumentParser(
+		description=VERSION,
+		formatter_class=argparse.RawDescriptionHelpFormatter,
+		epilog=f'''\
+Status server API (default port {STATUS_PORT}, 1-JABS on a phone keypad):
+  GET http://127.0.0.1:{STATUS_PORT}/status  ->  JSON with live progress
+
+  Example:
+    curl -s http://127.0.0.1:{STATUS_PORT}/status | python3 -m json.tool
+
+  Response: sets is a list sorted by pri. Per-set fields:
+    name, pri, running, started, completed, success, item, elapsed (when running)
+
+  Disable with -w 0 or STATUS_PORT=0 in the config file.
+'''
+	)
 	parser.add_argument('--version', action='version', version=VERSION)
 	parser.add_argument("-c", "--config", dest="configfile", default=CONFIGFILE,
 		help="Config file name")
@@ -1124,6 +1321,8 @@ def runFromCommandLine() -> int:
 		help="safe mode: just print what will do, don't change anything")
 	parser.add_argument("-p", "--parallel", action="store_true",
 		help="run sets with the same PRI concurrently; higher-PRI sets start only after all lower-PRI sets complete")
+	parser.add_argument("-w", "--status-port", dest="status_port", type=int, default=None,
+		help="TCP port for the HTTP status server (0 = disable); overrides STATUS_PORT in config")
 	parser.add_argument("sets", nargs="*",
 		help="list of sets to run; if omited, will run all")
 
@@ -1146,6 +1345,7 @@ def runFromCommandLine() -> int:
 		batch = args.batch,
 		safe = args.safe,
 		parallel = args.parallel,
+		status_port = args.status_port,
 	)
 
 

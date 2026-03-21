@@ -23,7 +23,10 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import io
 import os
+import shutil
+import time
 import types
+import datetime
 import unittest
 import unittest.mock
 
@@ -121,7 +124,191 @@ class TestMyLogger(unittest.TestCase):
 		self.assertNotIn('debug msg', sl.getstr(lvl=0))
 
 
+class TestStatusServer(unittest.TestCase):
+	''' Tests for StatusServer and the Jabs status tracking methods '''
+
+	# A port unlikely to conflict; tests bind briefly then release
+	PORT = 19876
+	PID_FILE = '/tmp/jabs-test-status.pid'
+
+	def setUp(self):
+		if os.path.exists(self.PID_FILE):
+			os.unlink(self.PID_FILE)
+
+	def tearDown(self):
+		if os.path.exists(self.PID_FILE):
+			os.unlink(self.PID_FILE)
+
+	def _make_jabs_with_status(self, sets_data:list) -> jabs.sync.Jabs:
+		'''
+			Build a Jabs instance with _status pre-populated.
+			@param sets_data list: list of dicts with keys: name, pri, running, started, completed, success, item
+			@return Jabs instance ready for status queries
+		'''
+		j = jabs.sync.Jabs()
+		j._status = {
+			'pid': os.getpid(),
+			'started': datetime.datetime(2026, 1, 1, 10, 0, 0),
+			'sets': {d['name']: dict(d) for d in sets_data},
+		}
+		return j
+
+	def test_query_returns_none_when_nothing_listening(self):
+		''' query() returns None when no server is on the given port '''
+		result = jabs.sync.StatusServer.query(self.PORT)
+		self.assertIsNone(result)
+
+	def test_server_serves_status(self):
+		''' StatusServer starts, serves GET /status, and stops cleanly '''
+		j = self._make_jabs_with_status([])
+		s = jabs.sync.StatusServer(self.PORT, j._get_status)
+		s.start()
+		try:
+			result = jabs.sync.StatusServer.query(self.PORT)
+			self.assertIsNotNone(result)
+			self.assertIn('sets', result)
+			self.assertIn('pid', result)
+			self.assertIn('now', result)
+		finally:
+			s.stop()
+
+	def test_server_404_on_unknown_path(self):
+		''' StatusServer returns 404 for any path other than /status '''
+		import urllib.request
+		import urllib.error
+		j = self._make_jabs_with_status([])
+		s = jabs.sync.StatusServer(self.PORT, j._get_status)
+		s.start()
+		try:
+			with self.assertRaises(urllib.error.HTTPError) as ctx:
+				urllib.request.urlopen(f'http://127.0.0.1:{self.PORT}/other', timeout=3)
+			self.assertEqual(ctx.exception.code, 404)
+		finally:
+			s.stop()
+
+	def test_get_status_empty(self):
+		''' _get_status on an empty sets dict returns a list '''
+		j = self._make_jabs_with_status([])
+		result = j._get_status()
+		self.assertIsInstance(result['sets'], list)
+		self.assertEqual(result['sets'], [])
+
+	def test_get_status_sorted_by_pri_then_name(self):
+		''' _get_status returns sets sorted by pri ascending, then by name '''
+		j = self._make_jabs_with_status([
+			{'name': 'Zeta', 'pri': 10, 'running': False, 'started': None, 'completed': None, 'success': None, 'item': None},
+			{'name': 'Alpha', 'pri': 20, 'running': False, 'started': None, 'completed': None, 'success': None, 'item': None},
+			{'name': 'Beta', 'pri': 10, 'running': False, 'started': None, 'completed': None, 'success': None, 'item': None},
+		])
+		sets = j._get_status()['sets']
+		names = [s['name'] for s in sets]
+		self.assertEqual(names, ['Beta', 'Zeta', 'Alpha'])
+
+	def test_get_status_serializes_datetimes(self):
+		''' _get_status converts datetime fields to ISO strings '''
+		t = datetime.datetime(2026, 3, 21, 12, 0, 0)
+		j = self._make_jabs_with_status([
+			{'name': 'A', 'pri': 10, 'running': False, 'started': t, 'completed': t, 'success': True, 'item': None},
+		])
+		s = j._get_status()['sets'][0]
+		self.assertIsInstance(s['started'], str)
+		self.assertIsInstance(s['completed'], str)
+		self.assertEqual(s['started'], t.isoformat())
+
+	def test_get_status_elapsed_only_when_running(self):
+		''' elapsed is present for running sets and absent for finished/pending ones '''
+		t = datetime.datetime.now() - datetime.timedelta(seconds=5)
+		j = self._make_jabs_with_status([
+			{'name': 'Running', 'pri': 10, 'running': True, 'started': t, 'completed': None, 'success': None, 'item': '/src'},
+			{'name': 'Done', 'pri': 20, 'running': False, 'started': t, 'completed': datetime.datetime.now(), 'success': True, 'item': None},
+		])
+		sets = {s['name']: s for s in j._get_status()['sets']}
+		self.assertIn('elapsed', sets['Running'])
+		self.assertNotIn('elapsed', sets['Done'])
+
+	def test_update_status_sets_running(self):
+		''' _update_status marks a set as running and stores item and started time '''
+		j = self._make_jabs_with_status([
+			{'name': 'MySet', 'pri': 10, 'running': False, 'started': None, 'completed': None, 'success': None, 'item': None},
+		])
+		t = datetime.datetime(2026, 3, 21, 8, 0, 0)
+		j._update_status('MySet', '/home/user', t)
+		entry = j._status['sets']['MySet']
+		self.assertTrue(entry['running'])
+		self.assertEqual(entry['started'], t)
+		self.assertEqual(entry['item'], '/home/user')
+
+	def test_update_status_noop_when_disabled(self):
+		''' _update_status does nothing when _status is empty (server disabled) '''
+		j = jabs.sync.Jabs()
+		j._update_status('NoSet', '/path', datetime.datetime.now())
+		self.assertEqual(j._status, {})
+
+	def test_clear_status_marks_finished(self):
+		''' _clear_status sets running=False, success, and completed '''
+		t_start = datetime.datetime(2026, 3, 21, 8, 0, 0)
+		t_end = datetime.datetime(2026, 3, 21, 9, 0, 0)
+		j = self._make_jabs_with_status([
+			{'name': 'MySet', 'pri': 10, 'running': True, 'started': t_start, 'completed': None, 'success': None, 'item': '/x'},
+		])
+		j._clear_status('MySet', success=True, completed=t_end)
+		entry = j._status['sets']['MySet']
+		self.assertFalse(entry['running'])
+		self.assertTrue(entry['success'])
+		self.assertEqual(entry['completed'], t_end)
+
+	def test_clear_status_noop_when_disabled(self):
+		''' _clear_status does nothing when _status is empty (server disabled) '''
+		j = jabs.sync.Jabs()
+		j._clear_status('NoSet', success=True, completed=datetime.datetime.now())
+		self.assertEqual(j._status, {})
+
+	def test_clear_status_unknown_set_is_safe(self):
+		''' _clear_status on a set name not in _status does not raise '''
+		j = self._make_jabs_with_status([])
+		j._clear_status('Ghost', success=False, completed=datetime.datetime.now())
+
+	def test_status_port_in_run(self):
+		'''
+			run() starts the status server during execution and stops it on return.
+			_run_set is mocked to avoid needing rsync in the test environment.
+		'''
+		queried_during:list = []
+
+		def fake_run_set(s, *args, **kwargs):
+			queried_during.append(jabs.sync.StatusServer.query(self.PORT))
+
+		DEST = '/tmp/jabs-backup'
+		if not os.path.exists(DEST):
+			os.mkdir(DEST)
+
+		j = jabs.sync.Jabs()
+		j.debug = -1
+		with unittest.mock.patch.object(j, '_run_set', side_effect=fake_run_set), \
+				unittest.mock.patch('jabs.sync.Program.get_version', return_value='mock'):
+			res = j.run('jabs.cfg', '/tmp/', pidFilePath=self.PID_FILE,
+				onlySets=['Test'], force=True, status_port=self.PORT)
+
+		self.assertEqual(res, 0)
+		# Server was reachable while run() was executing
+		self.assertTrue(len(queried_during) > 0)
+		self.assertIsNotNone(queried_during[0])
+		self.assertIn('sets', queried_during[0])
+		# Server is stopped after run() returns
+		self.assertIsNone(jabs.sync.StatusServer.query(self.PORT))
+
+
 class TestRun(unittest.TestCase):
+
+	PID_FILE = '/tmp/jabs-test-run.pid'
+
+	def setUp(self):
+		if os.path.exists(self.PID_FILE):
+			os.unlink(self.PID_FILE)
+
+	def tearDown(self):
+		if os.path.exists(self.PID_FILE):
+			os.unlink(self.PID_FILE)
 
 	def test_run_jabs(self):
 		''' Run a test backup '''
@@ -132,7 +319,7 @@ class TestRun(unittest.TestCase):
 
 		j = jabs.sync.Jabs()
 		j.debug = 1
-		res = j.run('jabs.cfg', '/tmp/', pidFilePath='/tmp/jabs.pid', onlySets=['Test'], force=True)
+		res = j.run('jabs.cfg', '/tmp/', pidFilePath=self.PID_FILE, onlySets=['Test'], force=True)
 		self.assertTrue(res == 0, res)
 
 	def test_run_jabs_parallel(self):
@@ -144,7 +331,7 @@ class TestRun(unittest.TestCase):
 
 		j = jabs.sync.Jabs()
 		j.debug = 1
-		res = j.run('jabs.cfg', '/tmp/', pidFilePath='/tmp/jabs.pid', onlySets=['Test'], force=True, parallel=True)
+		res = j.run('jabs.cfg', '/tmp/', pidFilePath=self.PID_FILE, onlySets=['Test'], force=True, parallel=True)
 		self.assertTrue(res == 0, res)
 
 

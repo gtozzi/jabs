@@ -1,6 +1,6 @@
 # JABS linux based makefile
 
-tests:
+tests: deb
 	mypy --ignore-missing-imports jabs
 	./dockertests.py
 
